@@ -47,22 +47,36 @@ export class LocalDatabase {
   public saveChat(chat: Chat) {
     const existing = this.db.prepare('SELECT name, last_message_time FROM chats WHERE id = ?').get(chat.id) as { name: string, last_message_time: number } | undefined;
     
-    const name = chat.name || existing?.name || chat.id.split('@')[0];
+    const name = (chat.name && chat.name !== chat.id) ? chat.name : (existing?.name || chat.id.split('@')[0]);
     const lastTime = Math.max(chat.lastMessageTime || 0, existing?.last_message_time || 0);
 
     const stmt = this.db.prepare(`
       INSERT INTO chats (id, name, is_group, unread, last_message_time)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        name = CASE WHEN excluded.name != '' THEN excluded.name ELSE chats.name END,
+        name = CASE WHEN excluded.name != '' AND excluded.name != excluded.id THEN excluded.name ELSE chats.name END,
         unread = excluded.unread,
-        last_message_time = MAX(chats.last_message_time, excluded.last_message_time)
+        last_message_time = MAX(COALESCE(chats.last_message_time, 0), excluded.last_message_time)
     `);
     stmt.run(chat.id, name, chat.isGroup ? 1 : 0, chat.unread, lastTime);
   }
 
   public getChats(): Chat[] {
-    const rows = this.db.prepare('SELECT * FROM chats ORDER BY last_message_time DESC').all() as Array<{
+    const rows = this.db.prepare(`
+      SELECT 
+        c.id, 
+        c.name, 
+        c.is_group, 
+        c.unread, 
+        MAX(COALESCE(c.last_message_time, 0), COALESCE(m.max_time, 0)) as last_message_time
+      FROM chats c
+      LEFT JOIN (
+        SELECT chat_id, MAX(timestamp) as max_time FROM messages GROUP BY chat_id
+      ) m ON c.id = m.chat_id
+      WHERE c.id NOT LIKE '%@newsletter' AND c.id != 'status@broadcast'
+      GROUP BY c.id
+      ORDER BY last_message_time DESC
+    `).all() as Array<{
       id: string;
       name: string;
       is_group: number;
@@ -75,11 +89,25 @@ export class LocalDatabase {
       name: r.name || r.id.split('@')[0],
       isGroup: Boolean(r.is_group),
       unread: r.unread,
-      lastMessageTime: r.last_message_time
+      lastMessageTime: r.last_message_time || 0
     }));
   }
 
   public saveMessage(msg: Message) {
+    // Ensure chat exists
+    const chatExists = this.db.prepare('SELECT id FROM chats WHERE id = ?').get(msg.chatId);
+    if (!chatExists) {
+      const isGroup = msg.chatId.endsWith('@g.us');
+      const name = isGroup ? msg.chatId.split('@')[0] : (msg.fromMe ? msg.chatId.split('@')[0] : msg.senderName);
+      this.saveChat({
+        id: msg.chatId,
+        name,
+        isGroup,
+        unread: msg.fromMe ? 0 : 1,
+        lastMessageTime: msg.timestamp
+      });
+    }
+
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -97,7 +125,7 @@ export class LocalDatabase {
 
     // Update chat last message time
     this.db.prepare(`
-      UPDATE chats SET last_message_time = MAX(last_message_time, ?) WHERE id = ?
+      UPDATE chats SET last_message_time = MAX(COALESCE(last_message_time, 0), ?) WHERE id = ?
     `).run(msg.timestamp, msg.chatId);
   }
 

@@ -21,6 +21,18 @@ export interface WhatsAppServiceEvents {
   onSyncProgress?: (info: string) => void;
 }
 
+function toNumber(t: any): number {
+  if (t === null || t === undefined) return 0;
+  if (typeof t === 'number') return isNaN(t) ? 0 : t;
+  if (typeof t === 'object') {
+    if (t.low !== undefined) return Number(t.low);
+    if (typeof t.toNumber === 'function') return t.toNumber();
+    return Number(t.toString()) || 0;
+  }
+  const parsed = Number(t);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
 export class WhatsAppService {
   private sock: WASocket | null = null;
   private db: LocalDatabase;
@@ -53,7 +65,8 @@ export class WhatsAppService {
       printQRInTerminal: false,
       auth: state,
       generateHighQualityLinkPreview: true,
-      syncFullHistory: true
+      syncFullHistory: true,
+      shouldSyncHistoryMessage: () => true
     });
 
     this.sock.ev.on('creds.update', saveCreds);
@@ -90,8 +103,8 @@ export class WhatsAppService {
       }
     });
 
-    // History sync from WhatsApp (initial pairing or on-demand response)
-    this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest, progress }) => {
+    // History sync from WhatsApp
+    this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
       if (contacts) {
         for (const c of contacts) {
           if (!c.id || c.id.endsWith('@newsletter')) continue;
@@ -111,12 +124,13 @@ export class WhatsAppService {
       if (chats) {
         for (const c of chats) {
           if (!c.id || c.id.endsWith('@newsletter') || c.id === 'status@broadcast') continue;
+          const ts = toNumber(c.conversationTimestamp) || toNumber(c.lastMessageRecvTimestamp);
           this.db.saveChat({
             id: c.id,
             name: c.name || c.id.split('@')[0],
             isGroup: c.id.endsWith('@g.us'),
             unread: c.unreadCount || 0,
-            lastMessageTime: Number(c.conversationTimestamp || Math.floor(Date.now() / 1000))
+            lastMessageTime: ts
           });
         }
       }
@@ -148,12 +162,13 @@ export class WhatsAppService {
     this.sock.ev.on('chats.upsert', (chats) => {
       for (const c of chats) {
         if (!c.id || c.id.endsWith('@newsletter') || c.id === 'status@broadcast') continue;
+        const ts = toNumber(c.conversationTimestamp) || toNumber(c.lastMessageRecvTimestamp);
         this.db.saveChat({
           id: c.id,
           name: c.name || c.id.split('@')[0],
           isGroup: c.id.endsWith('@g.us'),
           unread: c.unreadCount || 0,
-          lastMessageTime: Number(c.conversationTimestamp || Math.floor(Date.now() / 1000))
+          lastMessageTime: ts
         });
       }
       this.events.onChatsUpdated?.(this.db.getChats());
@@ -186,7 +201,7 @@ export class WhatsAppService {
     const fromMe = Boolean(m.key.fromMe);
     const senderId = fromMe ? (this.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net' || 'me') : (m.key.participant || chatId);
     const senderName = m.pushName || (fromMe ? 'Me' : senderId.split('@')[0]);
-    const timestamp = Number(m.messageTimestamp || Math.floor(Date.now() / 1000));
+    const timestamp = toNumber(m.messageTimestamp) || Math.floor(Date.now() / 1000);
 
     let text = '';
     let kind = 'text';
@@ -253,7 +268,7 @@ export class WhatsAppService {
           name: group.subject || id.split('@')[0],
           isGroup: true,
           unread: 0,
-          lastMessageTime: group.creation || Math.floor(Date.now() / 1000)
+          lastMessageTime: 0
         });
       }
       this.events.onChatsUpdated?.(this.db.getChats());
@@ -271,7 +286,7 @@ export class WhatsAppService {
       if (chats.length === 0) return;
 
       const totalToSync = Math.min(chats.length, 60);
-      this.events.onSyncProgress?.(`Syncing history for ${totalToSync} chats...`);
+      this.events.onSyncProgress?.(`Syncing history (${totalToSync} chats)...`);
 
       // Top 10 chats -> 100 messages
       // Next 50 chats -> 10 messages
@@ -303,7 +318,7 @@ export class WhatsAppService {
             oldest.timestamp * 1000
           );
 
-          // Delay 500ms between requests to avoid overloading the socket
+          // Delay 500ms between requests
           await new Promise((resolve) => setTimeout(resolve, 500));
         } catch {
           // Continue with next chat
@@ -326,7 +341,7 @@ export class WhatsAppService {
     if (!sent) return null;
 
     const selfId = this.sock.user?.id?.split(':')[0] + '@s.whatsapp.net' || 'me';
-    const timestamp = Number(sent.messageTimestamp || Math.floor(Date.now() / 1000));
+    const timestamp = toNumber(sent.messageTimestamp) || Math.floor(Date.now() / 1000);
 
     const msg: Message = {
       id: sent.key.id || Math.random().toString(36),

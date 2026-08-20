@@ -311,14 +311,30 @@ export class TerminalUI {
     const items = this.chats.map((c) => {
       const isGrp = c.isGroup ? '{blue-fg}[G]{/} ' : '';
       const unread = c.unread > 0 ? ` {yellow-fg}(${c.unread}){/}` : '';
-      const timeStr = c.lastMessageTime ? ` {gray-fg}${new Date(c.lastMessageTime * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{/}` : '';
+      let timeStr = '';
+      if (c.lastMessageTime && c.lastMessageTime > 0) {
+        const msgDate = new Date(c.lastMessageTime * 1000);
+        const now = new Date();
+        if (msgDate.toDateString() === now.toDateString()) {
+          timeStr = ` {gray-fg}${msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{/}`;
+        } else {
+          timeStr = ` {gray-fg}${msgDate.toLocaleDateString([], { month: 'numeric', day: 'numeric' })}{/}`;
+        }
+      }
       return `${isGrp}${c.name}${unread}${timeStr}`;
     });
 
     this.chatList.setItems(items);
 
-    if (this.chats.length > 0 && !this.selectedChat) {
-      this.selectedChat = this.chats[0];
+    if (this.chats.length > 0) {
+      const currentSelectedId = this.selectedChat?.id;
+      let newIdx = 0;
+      if (currentSelectedId) {
+        const found = this.chats.findIndex(c => c.id === currentSelectedId);
+        if (found !== -1) newIdx = found;
+      }
+      (this.chatList as any).select(newIdx);
+      this.selectedChat = this.chats[newIdx];
       this.loadMessagesForSelectedChat();
     }
 
