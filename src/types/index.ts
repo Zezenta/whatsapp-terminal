@@ -17,6 +17,7 @@ export interface Message {
   kind: string;
   mediaPath?: string;
   mediaPreview?: string;
+  rawMsg?: string;
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'qr' | 'connected' | 'error';

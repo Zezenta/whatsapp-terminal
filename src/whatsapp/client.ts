@@ -338,6 +338,11 @@ export class WhatsAppService {
       }
     }
 
+    let rawMsg: string | undefined;
+    try {
+      rawMsg = JSON.stringify(m);
+    } catch {}
+
     return {
       id: msgId,
       chatId,
@@ -348,7 +353,8 @@ export class WhatsAppService {
       text,
       kind,
       mediaPath,
-      mediaPreview
+      mediaPreview,
+      rawMsg
     };
   }
 
@@ -378,6 +384,39 @@ export class WhatsAppService {
       .finally(() => {
         this.downloadingMedia.delete(msgId);
       });
+  }
+
+  public async downloadMediaForMessage(msgId: string): Promise<string | null> {
+    const possibleJpg = path.join(this.mediaDir, `${msgId}.jpg`);
+    if (fs.existsSync(possibleJpg)) return possibleJpg;
+    const possibleWebp = path.join(this.mediaDir, `${msgId}.webp`);
+    if (fs.existsSync(possibleWebp)) return possibleWebp;
+
+    const rawJson = this.db.getRawMessage(msgId);
+    if (!rawJson) return null;
+
+    try {
+      const m = JSON.parse(rawJson) as WAMessage;
+      const isSticker = Boolean(m.message?.stickerMessage);
+      const ext = isSticker ? 'webp' : 'jpg';
+      const targetFile = path.join(this.mediaDir, `${msgId}.${ext}`);
+
+      const buffer = await downloadMediaMessage(m, 'buffer', {});
+      fs.writeFileSync(targetFile, buffer);
+
+      const preview = await generateAnsiThumbnail(buffer, 34, 16);
+      const parsed = await this.parseMessage(m);
+      if (parsed) {
+        parsed.mediaPath = targetFile;
+        parsed.mediaPreview = preview;
+        this.db.saveMessage(parsed);
+        this.events.onNewMessage?.(parsed);
+      }
+
+      return targetFile;
+    } catch {
+      return null;
+    }
   }
 
   public async fetchOlderMessages(chatId: string, count = 50): Promise<number> {

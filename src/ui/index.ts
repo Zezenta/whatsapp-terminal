@@ -18,6 +18,13 @@ function formatTimestamp24h(timestamp: number): string {
   return `${day}/${month} ${hours}:${minutes}`;
 }
 
+function sanitizeTextForTui(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/[\uFE00-\uFE0F]/g, '')
+    .replace(/[\u200B-\u200F\uFEFF]/g, '');
+}
+
 export class TerminalUI {
   private screen: blessed.Widgets.Screen;
   private header: blessed.Widgets.BoxElement;
@@ -281,9 +288,9 @@ export class TerminalUI {
     });
 
     // 'o' or 'v' to open the latest image/sticker in system viewer
-    this.screen.key(['o', 'v'], () => {
+    this.screen.key(['o', 'v'], async () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
-        this.openLatestMedia();
+        await this.openLatestMedia();
       }
     });
 
@@ -367,21 +374,41 @@ export class TerminalUI {
     this.isLoadingOlder = false;
   }
 
-  private openLatestMedia() {
+  private async openLatestMedia() {
     if (!this.selectedChat) return;
     const msgs = this.db.getMessages(this.selectedChat.id, 50);
-    const mediaMsg = msgs.reverse().find(m => m.mediaPath && fs.existsSync(m.mediaPath));
+    const mediaMsg = msgs.reverse().find(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
 
-    if (mediaMsg && mediaMsg.mediaPath) {
+    if (!mediaMsg) {
+      this.header.setContent(' {bold}{yellow-fg}● No image found in recent messages{/}');
+      this.screen.render();
+      return;
+    }
+
+    let targetPath = mediaMsg.mediaPath;
+    if (!targetPath || !fs.existsSync(targetPath)) {
+      this.header.setContent(' {bold}{yellow-fg}● Downloading image from WhatsApp...{/}');
+      this.screen.render();
+
+      const downloaded = await this.waService.downloadMediaForMessage(mediaMsg.id);
+      if (downloaded && fs.existsSync(downloaded)) {
+        targetPath = downloaded;
+      }
+    }
+
+    if (targetPath && fs.existsSync(targetPath)) {
       try {
         const viewer = fs.existsSync('/usr/bin/imv') ? 'imv' : 'xdg-open';
-        const child = spawn(viewer, [mediaMsg.mediaPath], { detached: true, stdio: 'ignore' });
+        const child = spawn(viewer, [targetPath], { detached: true, stdio: 'ignore' });
         child.unref();
-        this.header.setContent(` {bold}{green-fg}● Opened media in ${viewer}:{/} {gray-fg}${mediaMsg.mediaPath}{/}`);
+        this.header.setContent(` {bold}{green-fg}● Opened image in ${viewer}:{/} {gray-fg}${targetPath}{/}`);
         this.screen.render();
       } catch {
         // Ignored
       }
+    } else {
+      this.header.setContent(' {bold}{red-fg}● Could not load image file{/}');
+      this.screen.render();
     }
   }
 
@@ -418,7 +445,8 @@ export class TerminalUI {
       const isGrp = c.isGroup ? '{blue-fg}[G]{/} ' : '';
       const unread = c.unread > 0 ? ` {yellow-fg}(${c.unread}){/}` : '';
       const timeStr = c.lastMessageTime > 0 ? ` {gray-fg}${formatTimestamp24h(c.lastMessageTime)}{/}` : '';
-      const escapedName = blessed.escape(c.name);
+      const sanitizedName = sanitizeTextForTui(c.name);
+      const escapedName = blessed.escape(sanitizedName);
       return `${isGrp}${escapedName}${unread}${timeStr}`;
     });
 
@@ -456,7 +484,8 @@ export class TerminalUI {
     }
 
     const isGrp = this.selectedChat.isGroup ? 'Group' : 'Direct';
-    const escapedChatName = blessed.escape(this.selectedChat.name);
+    const sanitizedChatName = sanitizeTextForTui(this.selectedChat.name);
+    const escapedChatName = blessed.escape(sanitizedChatName);
     this.chatHeader.setContent(` {bold}${escapedChatName}{/} {gray-fg}(${isGrp} - ${this.selectedChat.id}){/}`);
 
     const limit = this.chatMessageLimits.get(this.selectedChat.id) || 50;
@@ -471,8 +500,10 @@ export class TerminalUI {
         const timeStr = formatTimestamp24h(m.timestamp);
         const senderColor = m.fromMe ? 'cyan-fg' : 'green-fg';
         const senderName = m.fromMe ? 'Me' : m.senderName;
-        const escapedSender = blessed.escape(senderName);
-        const escapedText = blessed.escape(m.text);
+        const sanitizedSender = sanitizeTextForTui(senderName);
+        const sanitizedText = sanitizeTextForTui(m.text);
+        const escapedSender = blessed.escape(sanitizedSender);
+        const escapedText = blessed.escape(sanitizedText);
 
         let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
 
