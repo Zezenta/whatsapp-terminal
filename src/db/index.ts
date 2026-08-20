@@ -18,6 +18,7 @@ export class LocalDatabase {
 
     this.initSchema();
     this.mergeDuplicateLidChats();
+    this.linkExistingMediaFiles();
   }
 
   private initSchema() {
@@ -64,6 +65,20 @@ export class LocalDatabase {
     } catch {}
     try {
       this.db.exec('ALTER TABLE messages ADD COLUMN raw_msg TEXT;');
+    } catch {}
+  }
+
+  public linkExistingMediaFiles() {
+    const mediaDir = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'media');
+    if (!fs.existsSync(mediaDir)) return;
+    try {
+      const files = fs.readdirSync(mediaDir);
+      const stmt = this.db.prepare('UPDATE messages SET media_path = ? WHERE id = ? AND (media_path IS NULL OR media_path = \'\')');
+      for (const file of files) {
+        const id = path.parse(file).name;
+        const fullPath = path.join(mediaDir, file);
+        stmt.run(fullPath, id);
+      }
     } catch {}
   }
 

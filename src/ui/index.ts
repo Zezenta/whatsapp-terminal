@@ -375,40 +375,66 @@ export class TerminalUI {
   private async openLatestMedia() {
     if (!this.selectedChat) return;
     const msgs = this.db.getMessages(this.selectedChat.id, 50);
-    const mediaMsg = msgs.reverse().find(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
+    const mediaMsgs = msgs.slice().reverse().filter(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
 
-    if (!mediaMsg) {
-      this.header.setContent(' {bold}{yellow-fg}● No image found in recent messages{/}');
+    if (mediaMsgs.length === 0) {
+      this.header.setContent(' {bold}{yellow-fg}● No media found in this chat{/}');
       this.screen.render();
       return;
     }
 
-    let targetPath = mediaMsg.mediaPath;
-    if (!targetPath || !fs.existsSync(targetPath)) {
+    let targetPath: string | undefined;
+
+    // 1. Check if any recent media message already has a local file on disk
+    for (const m of mediaMsgs) {
+      if (m.mediaPath && fs.existsSync(m.mediaPath)) {
+        targetPath = m.mediaPath;
+        break;
+      }
+      const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
+      const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
+      if (fs.existsSync(checkJpg)) {
+        targetPath = checkJpg;
+        break;
+      }
+      if (fs.existsSync(checkWebp)) {
+        targetPath = checkWebp;
+        break;
+      }
+    }
+
+    // 2. If not on disk, try downloading the most recent media message
+    if (!targetPath) {
       this.header.setContent(' {bold}{yellow-fg}● Downloading media from WhatsApp...{/}');
       this.screen.render();
 
-      if (mediaMsg.rawMsg) {
-        const dl = await this.waService.downloadMediaForMessage(mediaMsg.id);
-        if (dl && fs.existsSync(dl)) {
-          targetPath = dl;
+      for (const m of mediaMsgs) {
+        if (m.rawMsg) {
+          const dl = await this.waService.downloadMediaForMessage(m.id);
+          if (dl && fs.existsSync(dl)) {
+            targetPath = dl;
+            break;
+          }
         }
       }
 
-      if (!targetPath || !fs.existsSync(targetPath)) {
+      if (!targetPath) {
         await this.waService.resyncRecentChatHistory(this.selectedChat.id, 30);
         for (let i = 0; i < 20; i++) {
           await new Promise(r => setTimeout(r, 200));
-          const checkJpg = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.jpg`);
-          const checkWebp = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.webp`);
-          if (fs.existsSync(checkJpg)) {
-            targetPath = checkJpg;
-            break;
+          for (const m of mediaMsgs) {
+            const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
+            const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
+            if (fs.existsSync(checkJpg)) {
+              targetPath = checkJpg;
+              break;
+            }
+            if (fs.existsSync(checkWebp)) {
+              targetPath = checkWebp;
+              break;
+            }
           }
-          if (fs.existsSync(checkWebp)) {
-            targetPath = checkWebp;
-            break;
-          }
+          if (targetPath) break;
         }
       }
     }
@@ -538,6 +564,13 @@ export class TerminalUI {
         if (isMedia) {
           let mediaFile = m.mediaPath;
           if (!mediaFile || !fs.existsSync(mediaFile)) {
+            const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
+            const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
+            if (fs.existsSync(checkJpg)) mediaFile = checkJpg;
+            else if (fs.existsSync(checkWebp)) mediaFile = checkWebp;
+          }
+
+          if (!mediaFile || !fs.existsSync(mediaFile)) {
             if (m.rawMsg) {
               this.waService.downloadMediaForMessage(m.id).then((dl) => {
                 if (dl) {
@@ -556,9 +589,20 @@ export class TerminalUI {
                 lineOffset: currentLineCount
               });
 
-              for (let r = 0; r < prepared.rows; r++) {
-                renderedLines.push('  ');
-                currentLineCount++;
+              // Generate ANSI thumbnail as reliable fallback inside the text grid
+              let preview = m.mediaPreview;
+              if (!preview) {
+                preview = await generateAnsiThumbnail(mediaFile, 32, 12);
+              }
+
+              if (preview) {
+                renderedLines.push(preview);
+                currentLineCount += preview.split('\n').length;
+              } else {
+                for (let r = 0; r < prepared.rows; r++) {
+                  renderedLines.push('  ');
+                  currentLineCount++;
+                }
               }
             }
           } else if (m.mediaPreview) {
