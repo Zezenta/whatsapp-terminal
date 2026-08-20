@@ -374,82 +374,90 @@ export class TerminalUI {
 
   private async openLatestMedia() {
     if (!this.selectedChat) return;
-    const msgs = this.db.getMessages(this.selectedChat.id, 50);
-    const mediaMsgs = msgs.slice().reverse().filter(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
+    try {
+      const msgs = this.db.getMessages(this.selectedChat.id, 50);
+      const mediaMsgs = msgs.slice().reverse().filter(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
 
-    if (mediaMsgs.length === 0) {
-      this.header.setContent(' {bold}{yellow-fg}● No media found in this chat{/}');
-      this.screen.render();
-      return;
-    }
-
-    let targetPath: string | undefined;
-
-    for (const m of mediaMsgs) {
-      if (m.mediaPath && fs.existsSync(m.mediaPath)) {
-        targetPath = m.mediaPath;
-        break;
+      if (mediaMsgs.length === 0) {
+        this.header.setContent(' {bold}{yellow-fg}● No media found in this chat{/}');
+        this.screen.render();
+        return;
       }
-      const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
-      const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
-      if (fs.existsSync(checkJpg)) {
-        targetPath = checkJpg;
-        break;
-      }
-      if (fs.existsSync(checkWebp)) {
-        targetPath = checkWebp;
-        break;
-      }
-    }
 
-    if (!targetPath) {
-      this.header.setContent(' {bold}{yellow-fg}● Downloading media from WhatsApp...{/}');
-      this.screen.render();
+      let targetPath: string | undefined;
 
       for (const m of mediaMsgs) {
-        if (m.rawMsg) {
-          const dl = await this.waService.downloadMediaForMessage(m.id);
-          if (dl && fs.existsSync(dl)) {
-            targetPath = dl;
-            break;
-          }
+        if (m.mediaPath && fs.existsSync(m.mediaPath)) {
+          targetPath = m.mediaPath;
+          break;
+        }
+        const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
+        const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
+        if (fs.existsSync(checkJpg)) {
+          targetPath = checkJpg;
+          break;
+        }
+        if (fs.existsSync(checkWebp)) {
+          targetPath = checkWebp;
+          break;
         }
       }
 
       if (!targetPath) {
-        await this.waService.resyncRecentChatHistory(this.selectedChat.id, 30);
-        for (let i = 0; i < 20; i++) {
-          await new Promise(r => setTimeout(r, 200));
-          for (const m of mediaMsgs) {
-            const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
-            const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
-            if (fs.existsSync(checkJpg)) {
-              targetPath = checkJpg;
-              break;
-            }
-            if (fs.existsSync(checkWebp)) {
-              targetPath = checkWebp;
+        this.header.setContent(' {bold}{yellow-fg}● Downloading media from WhatsApp...{/}');
+        this.screen.render();
+
+        for (const m of mediaMsgs) {
+          if (m.rawMsg) {
+            const dl = await this.waService.downloadMediaForMessage(m.id);
+            if (dl && fs.existsSync(dl)) {
+              targetPath = dl;
               break;
             }
           }
-          if (targetPath) break;
+        }
+
+        if (!targetPath) {
+          await this.waService.resyncRecentChatHistory(this.selectedChat.id, 30);
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 200));
+            for (const m of mediaMsgs) {
+              const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
+              const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
+              if (fs.existsSync(checkJpg)) {
+                targetPath = checkJpg;
+                break;
+              }
+              if (fs.existsSync(checkWebp)) {
+                targetPath = checkWebp;
+                break;
+              }
+            }
+            if (targetPath) break;
+          }
         }
       }
-    }
 
-    if (targetPath && fs.existsSync(targetPath)) {
-      try {
-        const viewer = fs.existsSync('/usr/bin/imv') ? 'imv' : 'xdg-open';
-        const child = spawn(viewer, [targetPath], { detached: true, stdio: 'ignore' });
-        child.unref();
-        this.header.setContent(` {bold}{green-fg}● Opened image in ${viewer}:{/} {gray-fg}${targetPath}{/}`);
+      if (targetPath && fs.existsSync(targetPath)) {
+        try {
+          const viewer = fs.existsSync('/usr/bin/imv') ? 'imv' : 'xdg-open';
+          const child = spawn(viewer, [targetPath], { detached: true, stdio: 'ignore' });
+          child.on('error', (err) => {
+            this.header.setContent(` {bold}{red-fg}● Viewer error: ${err?.message || 'failed to spawn'}{/}`);
+            this.screen.render();
+          });
+          child.unref();
+          this.header.setContent(` {bold}{green-fg}● Opened image in ${viewer}:{/} {gray-fg}${targetPath}{/}`);
+          this.screen.render();
+        } catch {
+          // Ignored
+        }
+      } else {
+        this.header.setContent(' {bold}{red-fg}● Could not download image from WhatsApp{/}');
         this.screen.render();
-      } catch {
-        // Ignored
       }
-    } else {
-      this.header.setContent(' {bold}{red-fg}● Could not download image from WhatsApp{/}');
-      this.screen.render();
+    } catch {
+      // Ignored
     }
   }
 
@@ -518,154 +526,162 @@ export class TerminalUI {
   }
 
   public async loadMessagesForSelectedChat(preserveScroll = false) {
-    if (!this.selectedChat) {
-      this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
-      this.messageBox.setContent('No conversation selected');
-      this.visibleMediaList = [];
-      this.lastRenderedKittyState = '';
-      process.stdout.write(clearAllKittyImages());
-      this.screen.render();
-      return;
-    }
+    try {
+      if (!this.selectedChat) {
+        this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
+        this.messageBox.setContent('No conversation selected');
+        this.visibleMediaList = [];
+        this.lastRenderedKittyState = '';
+        process.stdout.write(clearAllKittyImages());
+        this.screen.render();
+        return;
+      }
 
-    const isGrp = this.selectedChat.isGroup ? 'Group' : 'Direct';
-    const sanitizedChatName = sanitizeTextForTui(this.selectedChat.name);
-    const escapedChatName = blessed.escape(sanitizedChatName);
-    this.chatHeader.setContent(` {bold}${escapedChatName}{/} {gray-fg}(${isGrp} - ${this.selectedChat.id}){/}`);
+      const isGrp = this.selectedChat.isGroup ? 'Group' : 'Direct';
+      const sanitizedChatName = sanitizeTextForTui(this.selectedChat.name);
+      const escapedChatName = blessed.escape(sanitizedChatName);
+      this.chatHeader.setContent(` {bold}${escapedChatName}{/} {gray-fg}(${isGrp} - ${this.selectedChat.id}){/}`);
 
-    const limit = this.chatMessageLimits.get(this.selectedChat.id) || 50;
-    const msgs = this.db.getMessages(this.selectedChat.id, limit);
+      const limit = this.chatMessageLimits.get(this.selectedChat.id) || 50;
+      const msgs = this.db.getMessages(this.selectedChat.id, limit);
 
-    if (msgs.length === 0) {
-      this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
-      this.visibleMediaList = [];
-      (this.messageBox as any).parseContent();
-    } else {
-      const renderedLines: string[] = [];
-      const newMediaList: VisibleMedia[] = [];
+      if (msgs.length === 0) {
+        this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
+        this.visibleMediaList = [];
+        (this.messageBox as any).parseContent();
+      } else {
+        const renderedLines: string[] = [];
+        const newMediaList: VisibleMedia[] = [];
 
-      for (const m of msgs) {
-        const timeStr = formatTimestamp24h(m.timestamp);
-        const senderColor = m.fromMe ? 'cyan-fg' : 'green-fg';
-        const senderName = m.fromMe ? 'Me' : m.senderName;
-        const sanitizedSender = sanitizeTextForTui(senderName);
-        const sanitizedText = sanitizeTextForTui(m.text);
-        const escapedSender = blessed.escape(sanitizedSender);
-        const escapedText = blessed.escape(sanitizedText);
+        for (const m of msgs) {
+          const timeStr = formatTimestamp24h(m.timestamp);
+          const senderColor = m.fromMe ? 'cyan-fg' : 'green-fg';
+          const senderName = m.fromMe ? 'Me' : m.senderName;
+          const sanitizedSender = sanitizeTextForTui(senderName);
+          const sanitizedText = sanitizeTextForTui(m.text);
+          const escapedSender = blessed.escape(sanitizedSender);
+          const escapedText = blessed.escape(sanitizedText);
 
-        let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
-        renderedLines.push(out);
+          let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
+          renderedLines.push(out);
 
-        const isSticker = m.kind === 'sticker';
-        const isMedia = m.kind === 'image' || isSticker;
+          const isSticker = m.kind === 'sticker';
+          const isMedia = m.kind === 'image' || isSticker;
 
-        if (isMedia) {
-          let mediaFile = m.mediaPath;
-          if (!mediaFile || !fs.existsSync(mediaFile)) {
-            const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
-            const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
-            if (fs.existsSync(checkJpg)) mediaFile = checkJpg;
-            else if (fs.existsSync(checkWebp)) mediaFile = checkWebp;
-          }
-
-          if (!mediaFile || !fs.existsSync(mediaFile)) {
-            if (m.rawMsg) {
-              this.waService.downloadMediaForMessage(m.id).then((dl) => {
-                if (dl) {
-                  this.loadMessagesForSelectedChat(true);
-                }
-              });
+          if (isMedia) {
+            let mediaFile = m.mediaPath;
+            if (!mediaFile || !fs.existsSync(mediaFile)) {
+              const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
+              const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
+              if (fs.existsSync(checkJpg)) mediaFile = checkJpg;
+              else if (fs.existsSync(checkWebp)) mediaFile = checkWebp;
             }
-          }
 
-          if (mediaFile && fs.existsSync(mediaFile)) {
-            // Stickers occupy 25% less width and height (75% size of regular images: 26 cols x 8 rows)
-            const maxCols = isSticker ? 26 : 34;
-            const maxRows = isSticker ? 8 : 11;
+            if (!mediaFile || !fs.existsSync(mediaFile)) {
+              if (m.rawMsg) {
+                this.waService.downloadMediaForMessage(m.id).then((dl) => {
+                  if (dl) {
+                    this.loadMessagesForSelectedChat(true);
+                  }
+                });
+              }
+            }
 
-            const prepared = await prepareImageForKitty(mediaFile, maxCols, maxRows);
-            if (prepared) {
-              newMediaList.push({
-                msgId: m.id,
-                prepared
-              });
+            if (mediaFile && fs.existsSync(mediaFile)) {
+              // Stickers occupy 25% less width and height (75% size of regular images: 26 cols x 8 rows)
+              const maxCols = isSticker ? 26 : 34;
+              const maxRows = isSticker ? 8 : 11;
 
-              // Tag line serves as an exact wrapped line anchor in Blessed _clines
-              renderedLines.push(`{black-fg}__MEDIA_${m.id}__{/}`);
-              for (let r = 1; r < prepared.rows; r++) {
-                renderedLines.push(' ');
+              const prepared = await prepareImageForKitty(mediaFile, maxCols, maxRows);
+              if (prepared) {
+                newMediaList.push({
+                  msgId: m.id,
+                  prepared
+                });
+
+                // Tag line serves as an exact wrapped line anchor in Blessed _clines
+                renderedLines.push(`{black-fg}__MEDIA_${m.id}__{/}`);
+                for (let r = 1; r < prepared.rows; r++) {
+                  renderedLines.push(' ');
+                }
               }
             }
           }
         }
+
+        this.visibleMediaList = newMediaList;
+        this.messageBox.setContent(renderedLines.join('\n'));
+        (this.messageBox as any).parseContent();
+
+        if (!preserveScroll) {
+          this.messageBox.setScrollPerc(100);
+        }
       }
 
-      this.visibleMediaList = newMediaList;
-      this.messageBox.setContent(renderedLines.join('\n'));
-      (this.messageBox as any).parseContent();
-
-      if (!preserveScroll) {
-        this.messageBox.setScrollPerc(100);
-      }
+      this.screen.render();
+    } catch {
+      // Ignored
     }
-
-    this.screen.render();
   }
 
   private renderKittyImages() {
-    if (!this.selectedChat || this.visibleMediaList.length === 0) {
-      if (this.lastRenderedKittyState !== 'empty') {
-        process.stdout.write(clearAllKittyImages());
-        this.lastRenderedKittyState = 'empty';
+    try {
+      if (!this.selectedChat || this.visibleMediaList.length === 0) {
+        if (this.lastRenderedKittyState !== 'empty') {
+          process.stdout.write(clearAllKittyImages());
+          this.lastRenderedKittyState = 'empty';
+        }
+        return;
       }
-      return;
-    }
 
-    const boxTop = (this.messageBox as any).atop || 4;
-    const boxLeft = (this.messageBox as any).aleft || 25;
-    const boxHeight = (this.messageBox as any).height || 17;
-    const scrollOffset = (this.messageBox as any).childBase || 0;
+      const boxTop = (this.messageBox as any).atop || 4;
+      const boxLeft = (this.messageBox as any).aleft || 25;
+      const boxHeight = (this.messageBox as any).height || 17;
+      const scrollOffset = (this.messageBox as any).childBase || 0;
 
-    const contentTop = boxTop + 2;
-    const contentLeft = boxLeft + 2;
-    const contentHeight = boxHeight - 2;
+      const contentTop = boxTop + 2;
+      const contentLeft = boxLeft + 2;
+      const contentHeight = boxHeight - 2;
 
-    const topBound = contentTop;
-    const bottomBound = contentTop + contentHeight - 1;
+      const topBound = contentTop;
+      const bottomBound = contentTop + contentHeight - 1;
 
-    const clines = (this.messageBox as any)._clines || [];
+      const clines = (this.messageBox as any)._clines || [];
 
-    const placements: Array<{ item: PreparedImage; screenX: number; screenY: number }> = [];
-    const placementKeys: string[] = [];
+      const placements: Array<{ item: PreparedImage; screenX: number; screenY: number }> = [];
+      const placementKeys: string[] = [];
 
-    for (const item of this.visibleMediaList) {
-      const tag = `__MEDIA_${item.msgId}__`;
-      const actualLineIdx = clines.findIndex((l: string) => l.includes(tag));
-      if (actualLineIdx === -1) continue;
+      for (const item of this.visibleMediaList) {
+        const tag = `__MEDIA_${item.msgId}__`;
+        const actualLineIdx = clines.findIndex((l: string) => l.includes(tag));
+        if (actualLineIdx === -1) continue;
 
-      const relLine = actualLineIdx - scrollOffset;
-      const screenY = contentTop + relLine;
-      const screenX = contentLeft + 1;
-      const screenBottom = screenY + item.prepared.rows - 1;
+        const relLine = actualLineIdx - scrollOffset;
+        const screenY = contentTop + relLine;
+        const screenX = contentLeft + 1;
+        const screenBottom = screenY + item.prepared.rows - 1;
 
-      // Only draw when the image fits inside the visible box area (no text overlap, no squashing)
-      if (screenY >= topBound && screenBottom <= bottomBound) {
-        placements.push({ item: item.prepared, screenX, screenY });
-        placementKeys.push(`${item.msgId}@${screenX},${screenY}`);
+        // Only draw when the image fits inside the visible box area (no text overlap, no squashing)
+        if (screenY >= topBound && screenBottom <= bottomBound) {
+          placements.push({ item: item.prepared, screenX, screenY });
+          placementKeys.push(`${item.msgId}@${screenX},${screenY}`);
+        }
       }
-    }
 
-    const newState = `${this.selectedChat.id}:${scrollOffset}:${placementKeys.join(';')}`;
-    if (newState === this.lastRenderedKittyState) {
-      return; // State has not changed — do NOT clear or redraw (eliminates flickering)
-    }
+      const newState = `${this.selectedChat.id}:${scrollOffset}:${placementKeys.join(';')}`;
+      if (newState === this.lastRenderedKittyState) {
+        return; // State has not changed — do NOT clear or redraw (eliminates flickering)
+      }
 
-    this.lastRenderedKittyState = newState;
-    process.stdout.write(clearAllKittyImages());
+      this.lastRenderedKittyState = newState;
+      process.stdout.write(clearAllKittyImages());
 
-    for (const p of placements) {
-      const cmd = createKittyPlacement(p.item, p.screenX, p.screenY);
-      process.stdout.write(cmd);
+      for (const p of placements) {
+        const cmd = createKittyPlacement(p.item, p.screenX, p.screenY);
+        process.stdout.write(cmd);
+      }
+    } catch {
+      // Ignored
     }
   }
 
