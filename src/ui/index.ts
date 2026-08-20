@@ -333,7 +333,7 @@ export class TerminalUI {
   private async handleMessageScrollUp(lines: number) {
     if (!this.selectedChat) return;
 
-    const currentScroll = this.messageBox.getScroll();
+    const currentScroll = (this.messageBox as any).childBase || 0;
     if (currentScroll <= 1 && !this.isLoadingOlder) {
       await this.loadMoreOlderMessages();
     } else {
@@ -363,9 +363,9 @@ export class TerminalUI {
 
     const delta = newScrollHeight - prevScrollHeight;
     if (delta > 0) {
-      this.messageBox.setScroll(delta);
+      this.messageBox.scrollTo(delta);
     } else {
-      this.messageBox.setScroll(0);
+      this.messageBox.scrollTo(0);
     }
 
     this.screen.render();
@@ -539,6 +539,7 @@ export class TerminalUI {
     if (msgs.length === 0) {
       this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
       this.visibleMediaList = [];
+      (this.messageBox as any).parseContent();
     } else {
       const renderedLines: string[] = [];
       const newMediaList: VisibleMedia[] = [];
@@ -595,6 +596,7 @@ export class TerminalUI {
 
       this.visibleMediaList = newMediaList;
       this.messageBox.setContent(renderedLines.join('\n'));
+      (this.messageBox as any).parseContent();
 
       if (!preserveScroll) {
         this.messageBox.setScrollPerc(100);
@@ -616,7 +618,7 @@ export class TerminalUI {
     const boxTop = (this.messageBox as any).atop || 4;
     const boxLeft = (this.messageBox as any).aleft || 25;
     const boxHeight = (this.messageBox as any).height || 17;
-    const scrollOffset = this.messageBox.getScroll() || 0;
+    const scrollOffset = (this.messageBox as any).childBase || 0;
 
     const contentTop = boxTop + 2;
     const contentLeft = boxLeft + 2;
