@@ -218,7 +218,6 @@ export class TerminalUI {
     this.loadCachedChats();
     this.chatList.focus();
 
-    // Hook screen render event to redraw Kitty graphics on every frame
     this.screen.on('render', () => {
       this.renderKittyImages();
     });
@@ -577,7 +576,7 @@ export class TerminalUI {
           }
 
           if (mediaFile && fs.existsSync(mediaFile)) {
-            const prepared = await prepareImageForKitty(mediaFile, 36, 14);
+            const prepared = await prepareImageForKitty(mediaFile, 34, 12);
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
@@ -618,14 +617,32 @@ export class TerminalUI {
     const contentLeft = boxLeft + 2;
     const visibleHeight = boxHeight - 2;
 
-    for (const item of this.visibleMediaList) {
-      const relLine = item.lineOffset - scrollOffset;
+    const viewTop = scrollOffset;
+    const viewBottom = scrollOffset + visibleHeight;
 
-      if (relLine >= 0 && relLine + item.prepared.rows <= visibleHeight) {
-        const screenY = contentTop + relLine + 1;
-        const screenX = contentLeft + 1;
-        const cmd = createKittyPlacement(item.prepared, screenX, screenY);
-        process.stdout.write(cmd);
+    for (const item of this.visibleMediaList) {
+      const itemTop = item.lineOffset;
+      const itemBottom = item.lineOffset + item.prepared.rows;
+
+      // Check if image intersects the visible viewport
+      if (itemBottom > viewTop && itemTop < viewBottom) {
+        let screenY: number;
+        let displayRows: number;
+
+        if (itemTop >= viewTop) {
+          screenY = contentTop + (itemTop - viewTop) + 1; // 1-indexed
+          displayRows = Math.min(item.prepared.rows, viewBottom - itemTop);
+        } else {
+          screenY = contentTop + 1; // 1-indexed top of viewport
+          displayRows = Math.min(itemBottom - viewTop, visibleHeight);
+        }
+
+        const screenX = contentLeft + 1; // 1-indexed
+
+        if (displayRows > 0) {
+          const cmd = createKittyPlacement(item.prepared, screenX, screenY, displayRows);
+          process.stdout.write(cmd);
+        }
       }
     }
   }

@@ -9,7 +9,7 @@ export interface PreparedImage {
   rows: number;
 }
 
-export async function prepareImageForKitty(imageSource: string, maxCols = 36, maxRows = 14): Promise<PreparedImage | null> {
+export async function prepareImageForKitty(imageSource: string, maxCols = 34, maxRows = 12): Promise<PreparedImage | null> {
   try {
     if (!fs.existsSync(imageSource)) return null;
 
@@ -33,7 +33,6 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 36, ma
     const width = metadata.width || 400;
     const height = metadata.height || 300;
 
-    // Terminal cells are approx 1:2 (width:height)
     const aspect = width / (height * 0.5);
 
     let cols = maxCols;
@@ -53,7 +52,8 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 36, ma
   }
 }
 
-export function createKittyPlacement(item: PreparedImage, screenX: number, screenY: number): string {
+export function createKittyPlacement(item: PreparedImage, screenX: number, screenY: number, displayRows?: number): string {
+  const rows = displayRows || item.rows;
   let out = `\x1b[s\x1b[${screenY};${screenX}H`;
 
   const b64 = item.pngBuffer.toString('base64');
@@ -65,7 +65,7 @@ export function createKittyPlacement(item: PreparedImage, screenX: number, scree
     const m = isLast ? 0 : 1;
 
     if (i === 0) {
-      out += `\x1b_Ga=T,f=100,z=1,q=2,c=${item.cols},r=${item.rows},m=${m};${chunk}\x1b\\`;
+      out += `\x1b_Ga=T,f=100,z=1,q=2,c=${item.cols},r=${rows},m=${m};${chunk}\x1b\\`;
     } else {
       out += `\x1b_Gm=${m};${chunk}\x1b\\`;
     }
