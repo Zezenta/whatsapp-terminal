@@ -17,6 +17,7 @@ export class LocalDatabase {
     this.db.pragma('foreign_keys = ON');
 
     this.initSchema();
+    this.mergeDuplicateLidChats();
   }
 
   private initSchema() {
@@ -53,6 +54,61 @@ export class LocalDatabase {
     `);
   }
 
+  public getCanonicalChatId(id: string): string {
+    if (!id) return '';
+    if (id.endsWith('@g.us') || id.endsWith('@newsletter') || id === 'status@broadcast') {
+      return id;
+    }
+
+    // If ID is LID (e.g. 9083922985052@lid), map to canonical Phone Number JID
+    if (id.endsWith('@lid')) {
+      const lidUser = id.split('@')[0];
+      const contact = this.db.prepare('SELECT phone FROM contacts WHERE lid = ? OR id = ?').get(lidUser, id) as { phone?: string } | undefined;
+      if (contact?.phone && contact.phone.trim() !== '') {
+        return `${contact.phone.trim()}@s.whatsapp.net`;
+      }
+    }
+
+    // If ID is Phone Number JID (e.g. 593984973460:0@s.whatsapp.net)
+    if (id.endsWith('@s.whatsapp.net')) {
+      const pnUser = id.split('@')[0].split(':')[0];
+      return `${pnUser}@s.whatsapp.net`;
+    }
+
+    return id;
+  }
+
+  public mergeDuplicateLidChats() {
+    const contactsWithBoth = this.db.prepare('SELECT phone, lid, name FROM contacts WHERE phone != \'\' AND lid != \'\'').all() as Array<{
+      phone: string;
+      lid: string;
+      name: string;
+    }>;
+
+    for (const c of contactsWithBoth) {
+      const pnJid = `${c.phone}@s.whatsapp.net`;
+      const lidJid = `${c.lid}@lid`;
+
+      // 1. Move all messages from LID chat to canonical Phone chat
+      this.db.prepare('UPDATE messages SET chat_id = ? WHERE chat_id = ?').run(pnJid, lidJid);
+
+      // 2. Merge timestamps and delete duplicate LID chat
+      const lidChat = this.db.prepare('SELECT last_message_time, unread FROM chats WHERE id = ?').get(lidJid) as { last_message_time: number; unread: number } | undefined;
+      if (lidChat) {
+        this.db.prepare(`
+          INSERT INTO chats (id, name, is_group, unread, last_message_time)
+          VALUES (?, ?, 0, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = CASE WHEN excluded.name != '' THEN excluded.name ELSE chats.name END,
+            unread = MAX(chats.unread, excluded.unread),
+            last_message_time = MAX(COALESCE(chats.last_message_time, 0), excluded.last_message_time)
+        `).run(pnJid, c.name, lidChat.unread, lidChat.last_message_time);
+
+        this.db.prepare('DELETE FROM chats WHERE id = ?').run(lidJid);
+      }
+    }
+  }
+
   public getNamedContactsCount(): number {
     const res = this.db.prepare('SELECT count(*) as c FROM contacts WHERE name IS NOT NULL AND length(name) > 0').get() as { c: number } | undefined;
     return res?.c || 0;
@@ -62,13 +118,12 @@ export class LocalDatabase {
     if (!c.id) return;
     const existing = this.db.prepare('SELECT * FROM contacts WHERE id = ?').get(c.id) as any;
     
-    // Only accept genuine address book names
     let validName = c.name?.trim() || existing?.name || '';
     if (validName === c.id || validName.includes('@') || (/^\d+$/.test(validName) && validName.length > 8) || validName === 'Me') {
       validName = existing?.name || '';
     }
 
-    const phone = c.phone || existing?.phone || (c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '');
+    const phone = c.phone || existing?.phone || (c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0].split(':')[0] : '');
     const lid = c.lid || existing?.lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '');
 
     this.db.prepare(`
@@ -80,15 +135,13 @@ export class LocalDatabase {
         lid = CASE WHEN excluded.lid != '' THEN excluded.lid ELSE contacts.lid END
     `).run(c.id, validName, phone, lid);
 
-    if (validName) {
-      const phoneJid = phone ? `${phone}@s.whatsapp.net` : '';
-      const lidJid = lid ? `${lid}@lid` : '';
+    if (phone && lid) {
+      this.mergeDuplicateLidChats();
+    }
 
-      this.db.prepare(`
-        UPDATE chats 
-        SET name = ? 
-        WHERE (id = ? OR id = ? OR id = ?) AND is_group = 0
-      `).run(validName, c.id, phoneJid, lidJid);
+    if (validName) {
+      const canonicalId = this.getCanonicalChatId(c.id);
+      this.db.prepare('UPDATE chats SET name = ? WHERE id = ? AND is_group = 0').run(validName, canonicalId);
     }
   }
 
@@ -110,7 +163,7 @@ export class LocalDatabase {
 
     // 3. If ID is Phone Number JID (e.g. 5939...@s.whatsapp.net)
     if (id.endsWith('@s.whatsapp.net')) {
-      const pnUser = id.split('@')[0];
+      const pnUser = id.split('@')[0].split(':')[0];
       const byPhone = this.db.prepare('SELECT name FROM contacts WHERE phone = ? OR id = ?').get(pnUser, id) as any;
       if (byPhone?.name && byPhone.name.trim() !== '') return byPhone.name.trim();
       return `+${pnUser}`;
@@ -120,7 +173,8 @@ export class LocalDatabase {
   }
 
   public saveChat(chat: Chat) {
-    const existing = this.db.prepare('SELECT name, last_message_time FROM chats WHERE id = ?').get(chat.id) as { name: string, last_message_time: number } | undefined;
+    const canonicalId = this.getCanonicalChatId(chat.id);
+    const existing = this.db.prepare('SELECT name, last_message_time FROM chats WHERE id = ?').get(canonicalId) as { name: string, last_message_time: number } | undefined;
     
     let cleanName = chat.name?.trim() || '';
     if (chat.isGroup) {
@@ -128,7 +182,7 @@ export class LocalDatabase {
         cleanName = existing?.name || '';
       }
     } else {
-      cleanName = this.resolveContactName(chat.id);
+      cleanName = this.resolveContactName(canonicalId);
     }
 
     const lastTime = Math.max(chat.lastMessageTime || 0, existing?.last_message_time || 0);
@@ -141,7 +195,7 @@ export class LocalDatabase {
         unread = excluded.unread,
         last_message_time = MAX(COALESCE(chats.last_message_time, 0), excluded.last_message_time)
     `);
-    stmt.run(chat.id, cleanName, chat.isGroup ? 1 : 0, chat.unread, lastTime);
+    stmt.run(canonicalId, cleanName, chat.isGroup ? 1 : 0, chat.unread, lastTime);
   }
 
   public getChats(): Chat[] {
@@ -156,7 +210,7 @@ export class LocalDatabase {
       LEFT JOIN (
         SELECT chat_id, MAX(timestamp) as max_time FROM messages GROUP BY chat_id
       ) m ON c.id = m.chat_id
-      WHERE c.id NOT LIKE '%@newsletter' AND c.id != 'status@broadcast'
+      WHERE c.id NOT LIKE '%@newsletter' AND c.id != 'status@broadcast' AND c.id NOT LIKE '%@lid'
       GROUP BY c.id
       ORDER BY last_message_time DESC
     `).all() as Array<{
@@ -188,12 +242,14 @@ export class LocalDatabase {
   }
 
   public saveMessage(msg: Message) {
-    const chatExists = this.db.prepare('SELECT id FROM chats WHERE id = ?').get(msg.chatId);
+    const canonicalChatId = this.getCanonicalChatId(msg.chatId);
+
+    const chatExists = this.db.prepare('SELECT id FROM chats WHERE id = ?').get(canonicalChatId);
     if (!chatExists) {
-      const isGroup = msg.chatId.endsWith('@g.us');
-      const resolvedName = isGroup ? '' : this.resolveContactName(msg.chatId);
+      const isGroup = canonicalChatId.endsWith('@g.us');
+      const resolvedName = isGroup ? '' : this.resolveContactName(canonicalChatId);
       this.saveChat({
-        id: msg.chatId,
+        id: canonicalChatId,
         name: resolvedName,
         isGroup,
         unread: msg.fromMe ? 0 : 1,
@@ -207,7 +263,7 @@ export class LocalDatabase {
     `);
     stmt.run(
       msg.id,
-      msg.chatId,
+      canonicalChatId,
       msg.senderId,
       msg.senderName,
       msg.timestamp,
@@ -218,15 +274,17 @@ export class LocalDatabase {
 
     this.db.prepare(`
       UPDATE chats SET last_message_time = MAX(COALESCE(last_message_time, 0), ?) WHERE id = ?
-    `).run(msg.timestamp, msg.chatId);
+    `).run(msg.timestamp, canonicalChatId);
   }
 
   public getMessages(chatId: string, limit = 150): Message[] {
+    const canonicalChatId = this.getCanonicalChatId(chatId);
+
     const rows = this.db.prepare(`
       SELECT * FROM (
-        SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?
+        SELECT * FROM messages WHERE chat_id = ? OR chat_id = ? ORDER BY timestamp DESC LIMIT ?
       ) ORDER BY timestamp ASC
-    `).all(chatId, limit) as Array<{
+    `).all(canonicalChatId, chatId, limit) as Array<{
       id: string;
       chat_id: string;
       sender_id: string;
@@ -257,9 +315,11 @@ export class LocalDatabase {
   }
 
   public getOldestMessage(chatId: string): Message | null {
+    const canonicalChatId = this.getCanonicalChatId(chatId);
+
     const row = this.db.prepare(`
-      SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC LIMIT 1
-    `).get(chatId) as {
+      SELECT * FROM messages WHERE chat_id = ? OR chat_id = ? ORDER BY timestamp ASC LIMIT 1
+    `).get(canonicalChatId, chatId) as {
       id: string;
       chat_id: string;
       sender_id: string;
@@ -284,9 +344,10 @@ export class LocalDatabase {
   }
 
   public getMessageCount(chatId: string): number {
+    const canonicalChatId = this.getCanonicalChatId(chatId);
     const res = this.db.prepare(`
-      SELECT COUNT(*) as count FROM messages WHERE chat_id = ?
-    `).get(chatId) as { count: number } | undefined;
+      SELECT COUNT(*) as count FROM messages WHERE chat_id = ? OR chat_id = ?
+    `).get(canonicalChatId, chatId) as { count: number } | undefined;
     return res?.count || 0;
   }
 
