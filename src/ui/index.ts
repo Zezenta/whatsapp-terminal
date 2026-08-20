@@ -49,6 +49,7 @@ export class TerminalUI {
   private chatMessageLimits = new Map<string, number>();
   private isLoadingOlder = false;
   private visibleMediaList: VisibleMedia[] = [];
+  private lastRenderedKittyState = '';
 
   constructor(database: LocalDatabase, whatsapp: WhatsAppService) {
     patchBlessedUnicode();
@@ -521,6 +522,7 @@ export class TerminalUI {
       this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
       this.messageBox.setContent('No conversation selected');
       this.visibleMediaList = [];
+      this.lastRenderedKittyState = '';
       process.stdout.write(clearAllKittyImages());
       this.screen.render();
       return;
@@ -576,7 +578,7 @@ export class TerminalUI {
           }
 
           if (mediaFile && fs.existsSync(mediaFile)) {
-            const prepared = await prepareImageForKitty(mediaFile, 34, 12);
+            const prepared = await prepareImageForKitty(mediaFile, 34, 11);
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
@@ -605,45 +607,53 @@ export class TerminalUI {
   }
 
   private renderKittyImages() {
-    process.stdout.write(clearAllKittyImages());
-    if (this.visibleMediaList.length === 0 || !this.selectedChat) return;
+    if (!this.selectedChat || this.visibleMediaList.length === 0) {
+      if (this.lastRenderedKittyState !== 'empty') {
+        process.stdout.write(clearAllKittyImages());
+        this.lastRenderedKittyState = 'empty';
+      }
+      return;
+    }
 
     const boxTop = (this.messageBox as any).atop || 4;
     const boxLeft = (this.messageBox as any).aleft || 25;
     const boxHeight = (this.messageBox as any).height || 17;
     const scrollOffset = this.messageBox.getScroll() || 0;
 
-    const contentTop = boxTop + 1;
+    const contentTop = boxTop + 2;
     const contentLeft = boxLeft + 2;
-    const visibleHeight = boxHeight - 2;
+    const contentHeight = boxHeight - 2;
 
-    const viewTop = scrollOffset;
-    const viewBottom = scrollOffset + visibleHeight;
+    const topBound = contentTop;
+    const bottomBound = contentTop + contentHeight - 1;
+
+    const placements: Array<{ item: PreparedImage; screenX: number; screenY: number }> = [];
+    const placementKeys: string[] = [];
 
     for (const item of this.visibleMediaList) {
-      const itemTop = item.lineOffset;
-      const itemBottom = item.lineOffset + item.prepared.rows;
+      const relLine = item.lineOffset - scrollOffset;
+      const screenY = contentTop + relLine;
+      const screenX = contentLeft + 1;
+      const screenBottom = screenY + item.prepared.rows - 1;
 
-      // Check if image intersects the visible viewport
-      if (itemBottom > viewTop && itemTop < viewBottom) {
-        let screenY: number;
-        let displayRows: number;
-
-        if (itemTop >= viewTop) {
-          screenY = contentTop + (itemTop - viewTop) + 1; // 1-indexed
-          displayRows = Math.min(item.prepared.rows, viewBottom - itemTop);
-        } else {
-          screenY = contentTop + 1; // 1-indexed top of viewport
-          displayRows = Math.min(itemBottom - viewTop, visibleHeight);
-        }
-
-        const screenX = contentLeft + 1; // 1-indexed
-
-        if (displayRows > 0) {
-          const cmd = createKittyPlacement(item.prepared, screenX, screenY, displayRows);
-          process.stdout.write(cmd);
-        }
+      // Only draw when the image fits inside the visible box area (no text overlap, no squashing)
+      if (screenY >= topBound && screenBottom <= bottomBound) {
+        placements.push({ item: item.prepared, screenX, screenY });
+        placementKeys.push(`${item.msgId}@${screenX},${screenY}`);
       }
+    }
+
+    const newState = `${this.selectedChat.id}:${scrollOffset}:${placementKeys.join(';')}`;
+    if (newState === this.lastRenderedKittyState) {
+      return; // State has not changed — do NOT clear or redraw (eliminates flickering)
+    }
+
+    this.lastRenderedKittyState = newState;
+    process.stdout.write(clearAllKittyImages());
+
+    for (const p of placements) {
+      const cmd = createKittyPlacement(p.item, p.screenX, p.screenY);
+      process.stdout.write(cmd);
     }
   }
 
