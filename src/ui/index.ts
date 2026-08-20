@@ -6,7 +6,7 @@ import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
 import { WhatsAppService } from '../whatsapp/client.js';
-import { generateAnsiThumbnail } from './media.js';
+import { prepareImageForKitty, createKittyPlacement, clearAllKittyImages, generateAnsiThumbnail } from './media.js';
 
 function formatTimestamp24h(timestamp: number): string {
   if (!timestamp || timestamp <= 0) return '';
@@ -25,6 +25,14 @@ function sanitizeTextForTui(text: string): string {
     .replace(/[\u200B-\u200F\uFEFF]/g, '');
 }
 
+interface VisibleMedia {
+  msgId: string;
+  pngBuffer: Buffer;
+  lineOffset: number;
+  cols: number;
+  rows: number;
+}
+
 export class TerminalUI {
   private screen: blessed.Widgets.Screen;
   private header: blessed.Widgets.BoxElement;
@@ -41,15 +49,14 @@ export class TerminalUI {
   private activePanel: 'chats' | 'messages' | 'input' = 'chats';
   private chatMessageLimits = new Map<string, number>();
   private isLoadingOlder = false;
+  private visibleMediaList: VisibleMedia[] = [];
 
   constructor(database: LocalDatabase, whatsapp: WhatsAppService) {
-    // 0. Patch Blessed Unicode engine for modern double-width emojis
     patchBlessedUnicode();
 
     this.db = database;
     this.waService = whatsapp;
 
-    // 1. Initialize Blessed Screen
     this.screen = blessed.screen({
       smartCSR: true,
       title: 'WhatsApp Terminal',
@@ -62,7 +69,6 @@ export class TerminalUI {
       }
     });
 
-    // 2. Top Header Bar
     this.header = blessed.box({
       top: 0,
       left: 0,
@@ -77,7 +83,6 @@ export class TerminalUI {
       }
     });
 
-    // 3. Left Panel (Chat List)
     this.chatList = blessed.list({
       top: 1,
       left: 0,
@@ -114,7 +119,6 @@ export class TerminalUI {
       }
     });
 
-    // 4. Right Panel: Chat Title Header
     this.chatHeader = blessed.box({
       top: 1,
       left: '32%',
@@ -135,7 +139,6 @@ export class TerminalUI {
       }
     });
 
-    // 5. Right Panel: Message Viewport
     this.messageBox = blessed.box({
       top: 4,
       left: '32%',
@@ -164,7 +167,6 @@ export class TerminalUI {
       }
     });
 
-    // 6. Right Panel: Message Input Field
     this.inputBox = blessed.textbox({
       top: '100%-3',
       left: '32%',
@@ -185,7 +187,6 @@ export class TerminalUI {
       }
     });
 
-    // 7. QR Code Modal
     this.qrBox = blessed.box({
       top: 'center',
       left: 'center',
@@ -207,7 +208,6 @@ export class TerminalUI {
       align: 'center'
     });
 
-    // Mount elements
     this.screen.append(this.header);
     this.screen.append(this.chatList);
     this.screen.append(this.chatHeader);
@@ -219,16 +219,16 @@ export class TerminalUI {
     this.loadCachedChats();
     this.chatList.focus();
     this.screen.render();
+    this.renderKittyImages();
   }
 
   private setupKeybindings() {
-    // Global Quit
     this.screen.key(['C-c'], () => {
       this.waService.disconnect();
+      process.stdout.write(clearAllKittyImages());
       return process.exit(0);
     });
 
-    // Tab Navigation
     this.screen.key(['tab'], () => {
       if (this.activePanel === 'input') return;
 
@@ -239,7 +239,6 @@ export class TerminalUI {
       }
     });
 
-    // Up / Down / k / j navigation
     this.screen.key(['up', 'k'], () => {
       if (this.activePanel === 'chats') {
         (this.chatList as any).up(1);
@@ -256,10 +255,10 @@ export class TerminalUI {
       } else if (this.activePanel === 'messages') {
         this.messageBox.scroll(2);
         this.screen.render();
+        this.renderKittyImages();
       }
     });
 
-    // PageUp / PageDown
     this.screen.key(['pageup'], () => {
       if (this.activePanel === 'messages') {
         this.handleMessageScrollUp(10);
@@ -270,10 +269,10 @@ export class TerminalUI {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(10);
         this.screen.render();
+        this.renderKittyImages();
       }
     });
 
-    // Mouse wheel scroll on message box
     this.messageBox.on('wheelup', () => {
       if (this.activePanel === 'messages') {
         this.handleMessageScrollUp(3);
@@ -284,17 +283,16 @@ export class TerminalUI {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(3);
         this.screen.render();
+        this.renderKittyImages();
       }
     });
 
-    // 'o' or 'v' to open the latest image/sticker in system viewer
     this.screen.key(['o', 'v'], async () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
         await this.openLatestMedia();
       }
     });
 
-    // 'i' or 'Enter' to focus input box
     this.screen.key(['i', 'enter'], () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
         this.setFocus('input');
@@ -303,21 +301,20 @@ export class TerminalUI {
       }
     });
 
-    // 'q' to quit when not typing
     this.screen.key(['q'], () => {
       if (this.activePanel !== 'input') {
         this.waService.disconnect();
+        process.stdout.write(clearAllKittyImages());
         return process.exit(0);
       }
     });
 
-    // Input submission
     this.inputBox.on('submit', async (text) => {
       const trimmed = text.trim();
       if (trimmed && this.selectedChat) {
         try {
           await this.waService.sendMessage(this.selectedChat.id, trimmed);
-          this.loadMessagesForSelectedChat(false);
+          await this.loadMessagesForSelectedChat(false);
         } catch (err: any) {
           this.updateStatus('error', err?.message || 'Send failed');
         }
@@ -341,6 +338,7 @@ export class TerminalUI {
     } else {
       this.messageBox.scroll(-lines);
       this.screen.render();
+      this.renderKittyImages();
     }
   }
 
@@ -371,6 +369,7 @@ export class TerminalUI {
     }
 
     this.screen.render();
+    this.renderKittyImages();
     this.isLoadingOlder = false;
   }
 
@@ -428,6 +427,7 @@ export class TerminalUI {
     }
 
     this.screen.render();
+    this.renderKittyImages();
   }
 
   private loadCachedChats() {
@@ -465,6 +465,7 @@ export class TerminalUI {
     }
 
     this.screen.render();
+    this.renderKittyImages();
   }
 
   private onChatSelectionChanged() {
@@ -479,7 +480,9 @@ export class TerminalUI {
     if (!this.selectedChat) {
       this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
       this.messageBox.setContent('No conversation selected');
+      this.visibleMediaList = [];
       this.screen.render();
+      process.stdout.write(clearAllKittyImages());
       return;
     }
 
@@ -493,8 +496,11 @@ export class TerminalUI {
 
     if (msgs.length === 0) {
       this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
+      this.visibleMediaList = [];
     } else {
       const renderedLines: string[] = [];
+      const newMediaList: VisibleMedia[] = [];
+      let currentLineCount = 0;
 
       for (const m of msgs) {
         const timeStr = formatTimestamp24h(m.timestamp);
@@ -506,33 +512,78 @@ export class TerminalUI {
         const escapedText = blessed.escape(sanitizedText);
 
         let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
+        renderedLines.push(out);
+        currentLineCount++;
 
-        // Check if we have media preview or need to generate it from mediaPath
-        let preview = m.mediaPreview;
-        if (!preview && m.mediaPath && fs.existsSync(m.mediaPath)) {
-          preview = await generateAnsiThumbnail(m.mediaPath, 34, 16);
-          if (preview) {
-            this.db.saveMessage({
-              ...m,
-              mediaPreview: preview
-            });
+        const isMedia = m.kind === 'image' || m.kind === 'sticker';
+        if (isMedia) {
+          // Check if file exists or download it
+          let mediaFile = m.mediaPath;
+          if (!mediaFile || !fs.existsSync(mediaFile)) {
+            // Trigger async download if we have rawMsg
+            if (m.rawMsg) {
+              this.waService.downloadMediaForMessage(m.id).then((dl) => {
+                if (dl) {
+                  this.loadMessagesForSelectedChat(true);
+                }
+              });
+            }
+          }
+
+          if (mediaFile && fs.existsSync(mediaFile)) {
+            const prepared = await prepareImageForKitty(mediaFile, 32, 12);
+            if (prepared) {
+              newMediaList.push({
+                msgId: m.id,
+                pngBuffer: prepared.pngBuffer,
+                lineOffset: currentLineCount,
+                cols: prepared.cols,
+                rows: prepared.rows
+              });
+
+              // Reserve space in messageBox
+              for (let r = 0; r < prepared.rows; r++) {
+                renderedLines.push('  ');
+                currentLineCount++;
+              }
+            }
+          } else if (m.mediaPreview) {
+            renderedLines.push(m.mediaPreview);
+            currentLineCount += m.mediaPreview.split('\n').length;
           }
         }
-
-        if (preview) {
-          out += `\n${preview}`;
-        }
-
-        renderedLines.push(out);
       }
 
+      this.visibleMediaList = newMediaList;
       this.messageBox.setContent(renderedLines.join('\n'));
+
       if (!preserveScroll) {
         this.messageBox.setScrollPerc(100);
       }
     }
 
     this.screen.render();
+    this.renderKittyImages();
+  }
+
+  private renderKittyImages() {
+    process.stdout.write(clearAllKittyImages());
+    if (this.visibleMediaList.length === 0 || !this.selectedChat) return;
+
+    const boxTop = (this.messageBox as any).atop + 2;
+    const boxLeft = (this.messageBox as any).aleft + 3;
+    const boxHeight = (this.messageBox as any).height - 2;
+    const scrollOffset = this.messageBox.getScroll();
+
+    for (const item of this.visibleMediaList) {
+      const screenY = boxTop + item.lineOffset - scrollOffset;
+      const screenBottom = screenY + item.rows;
+
+      if (screenY >= boxTop && screenBottom <= boxTop + boxHeight + 1) {
+        const cmd = createKittyPlacement(item.pngBuffer, boxLeft, screenY, item.cols, item.rows);
+        process.stdout.write(cmd);
+      }
+    }
   }
 
   public showQR(qrCodeStr: string) {
@@ -568,6 +619,7 @@ export class TerminalUI {
       this.header.setContent(` {bold}{red-fg}● Offline${err}{/} | {gray-fg}Reconnecting...{/}`);
     }
     this.screen.render();
+    this.renderKittyImages();
   }
 
   public updateSyncProgress(info: string) {
