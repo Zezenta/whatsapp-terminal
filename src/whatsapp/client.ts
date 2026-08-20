@@ -18,6 +18,7 @@ export interface WhatsAppServiceEvents {
   onStatusChange?: (status: ConnectionStatus, userJid?: string) => void;
   onNewMessage?: (msg: Message) => void;
   onChatsUpdated?: (chats: Chat[]) => void;
+  onSyncProgress?: (info: string) => void;
 }
 
 export class WhatsAppService {
@@ -26,6 +27,7 @@ export class WhatsAppService {
   private authDir: string;
   private events: WhatsAppServiceEvents;
   private isConnecting = false;
+  private isSyncingHistory = false;
 
   constructor(database: LocalDatabase, events: WhatsAppServiceEvents = {}, customAuthDir?: string) {
     this.db = database;
@@ -51,7 +53,7 @@ export class WhatsAppService {
       printQRInTerminal: false,
       auth: state,
       generateHighQualityLinkPreview: true,
-      syncFullHistory: false
+      syncFullHistory: true
     });
 
     this.sock.ev.on('creds.update', saveCreds);
@@ -69,6 +71,11 @@ export class WhatsAppService {
         const userJid = this.sock?.user?.id || '';
         this.events.onStatusChange?.('connected', userJid);
         this.loadGroupsAndChats();
+
+        // Start background bulk history sync after connection stabilizes
+        setTimeout(() => {
+          this.startBulkHistorySync();
+        }, 3000);
       }
 
       if (connection === 'close') {
@@ -81,6 +88,49 @@ export class WhatsAppService {
           setTimeout(() => this.connect(), 3000);
         }
       }
+    });
+
+    // History sync from WhatsApp (initial pairing or on-demand response)
+    this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest, progress }) => {
+      if (contacts) {
+        for (const c of contacts) {
+          if (!c.id || c.id.endsWith('@newsletter')) continue;
+          const name = c.name || c.notify || c.verifiedName || '';
+          if (name) {
+            this.db.saveChat({
+              id: c.id,
+              name,
+              isGroup: c.id.endsWith('@g.us'),
+              unread: 0,
+              lastMessageTime: 0
+            });
+          }
+        }
+      }
+
+      if (chats) {
+        for (const c of chats) {
+          if (!c.id || c.id.endsWith('@newsletter') || c.id === 'status@broadcast') continue;
+          this.db.saveChat({
+            id: c.id,
+            name: c.name || c.id.split('@')[0],
+            isGroup: c.id.endsWith('@g.us'),
+            unread: c.unreadCount || 0,
+            lastMessageTime: Number(c.conversationTimestamp || Math.floor(Date.now() / 1000))
+          });
+        }
+      }
+
+      if (messages) {
+        for (const m of messages) {
+          const parsed = this.parseMessage(m);
+          if (parsed) {
+            this.db.saveMessage(parsed);
+          }
+        }
+      }
+
+      this.events.onChatsUpdated?.(this.db.getChats());
     });
 
     this.sock.ev.on('messages.upsert', async ({ messages: rawMessages }) => {
@@ -209,6 +259,61 @@ export class WhatsAppService {
       this.events.onChatsUpdated?.(this.db.getChats());
     } catch {
       // Ignored
+    }
+  }
+
+  public async startBulkHistorySync(): Promise<void> {
+    if (!this.sock || this.isSyncingHistory) return;
+    this.isSyncingHistory = true;
+
+    try {
+      const chats = this.db.getChats();
+      if (chats.length === 0) return;
+
+      const totalToSync = Math.min(chats.length, 60);
+      this.events.onSyncProgress?.(`Syncing history for ${totalToSync} chats...`);
+
+      // Top 10 chats -> 100 messages
+      // Next 50 chats -> 10 messages
+      for (let i = 0; i < totalToSync; i++) {
+        const chat = chats[i];
+        const targetCount = i < 10 ? 100 : 10;
+        const currentCount = this.db.getMessageCount(chat.id);
+
+        if (currentCount >= targetCount) {
+          continue;
+        }
+
+        const oldest = this.db.getOldestMessage(chat.id);
+        if (!oldest) {
+          continue;
+        }
+
+        try {
+          const needed = targetCount - currentCount;
+          this.events.onSyncProgress?.(`Syncing [${i + 1}/${totalToSync}] ${chat.name} (${needed} msgs)...`);
+
+          await this.sock.fetchMessageHistory(
+            needed,
+            {
+              remoteJid: chat.id,
+              fromMe: oldest.fromMe,
+              id: oldest.id
+            },
+            oldest.timestamp * 1000
+          );
+
+          // Delay 500ms between requests to avoid overloading the socket
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } catch {
+          // Continue with next chat
+        }
+      }
+
+      this.events.onChatsUpdated?.(this.db.getChats());
+      this.events.onSyncProgress?.('Sync complete');
+    } finally {
+      this.isSyncingHistory = false;
     }
   }
 

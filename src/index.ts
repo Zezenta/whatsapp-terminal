@@ -19,6 +19,9 @@ async function main() {
     },
     onNewMessage: (msg) => {
       ui?.onNewIncomingMessage(msg);
+    },
+    onSyncProgress: (info) => {
+      ui?.updateSyncProgress(info);
     }
   });
 

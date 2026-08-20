@@ -54,9 +54,9 @@ export class LocalDatabase {
       INSERT INTO chats (id, name, is_group, unread, last_message_time)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
+        name = CASE WHEN excluded.name != '' THEN excluded.name ELSE chats.name END,
         unread = excluded.unread,
-        last_message_time = excluded.last_message_time
+        last_message_time = MAX(chats.last_message_time, excluded.last_message_time)
     `);
     stmt.run(chat.id, name, chat.isGroup ? 1 : 0, chat.unread, lastTime);
   }
@@ -101,9 +101,11 @@ export class LocalDatabase {
     `).run(msg.timestamp, msg.chatId);
   }
 
-  public getMessages(chatId: string, limit = 100): Message[] {
+  public getMessages(chatId: string, limit = 150): Message[] {
     const rows = this.db.prepare(`
-      SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC LIMIT ?
+      SELECT * FROM (
+        SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?
+      ) ORDER BY timestamp ASC
     `).all(chatId, limit) as Array<{
       id: string;
       chat_id: string;
@@ -125,6 +127,40 @@ export class LocalDatabase {
       text: r.text,
       kind: r.kind
     }));
+  }
+
+  public getOldestMessage(chatId: string): Message | null {
+    const row = this.db.prepare(`
+      SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC LIMIT 1
+    `).get(chatId) as {
+      id: string;
+      chat_id: string;
+      sender_id: string;
+      sender_name: string;
+      timestamp: number;
+      from_me: number;
+      text: string;
+      kind: string;
+    } | undefined;
+
+    if (!row) return null;
+    return {
+      id: row.id,
+      chatId: row.chat_id,
+      senderId: row.sender_id,
+      senderName: row.sender_name || row.sender_id.split('@')[0],
+      timestamp: row.timestamp,
+      fromMe: Boolean(row.from_me),
+      text: row.text,
+      kind: row.kind
+    };
+  }
+
+  public getMessageCount(chatId: string): number {
+    const res = this.db.prepare(`
+      SELECT COUNT(*) as count FROM messages WHERE chat_id = ?
+    `).get(chatId) as { count: number } | undefined;
+    return res?.count || 0;
   }
 
   public close() {

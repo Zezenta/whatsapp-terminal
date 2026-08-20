@@ -397,6 +397,11 @@ export class TerminalUI {
     this.screen.render();
   }
 
+  public updateSyncProgress(info: string) {
+    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [i/Enter] Type | [q] Quit{/}`);
+    this.screen.render();
+  }
+
   public onNewIncomingMessage(msg: Message) {
     if (this.selectedChat && this.selectedChat.id === msg.chatId) {
       this.loadMessagesForSelectedChat();
