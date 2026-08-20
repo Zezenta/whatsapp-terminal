@@ -29,7 +29,6 @@ function sanitizeTextForTui(text: string): string {
 interface VisibleMedia {
   msgId: string;
   prepared: PreparedImage;
-  lineOffset: number;
 }
 
 export class TerminalUI {
@@ -145,6 +144,7 @@ export class TerminalUI {
       width: '68%',
       height: '100%-7',
       tags: true,
+      wrap: true,
       scrollable: true,
       alwaysScroll: true,
       mouse: true,
@@ -542,7 +542,6 @@ export class TerminalUI {
     } else {
       const renderedLines: string[] = [];
       const newMediaList: VisibleMedia[] = [];
-      let currentLineCount = 0;
 
       for (const m of msgs) {
         const timeStr = formatTimestamp24h(m.timestamp);
@@ -555,7 +554,6 @@ export class TerminalUI {
 
         let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
         renderedLines.push(out);
-        currentLineCount++;
 
         const isMedia = m.kind === 'image' || m.kind === 'sticker';
         if (isMedia) {
@@ -582,13 +580,13 @@ export class TerminalUI {
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
-                prepared,
-                lineOffset: currentLineCount
+                prepared
               });
 
-              for (let r = 0; r < prepared.rows; r++) {
-                renderedLines.push('  ');
-                currentLineCount++;
+              // Tag line serves as an exact wrapped line anchor in Blessed _clines
+              renderedLines.push(`{black-fg}__MEDIA_${m.id}__{/}`);
+              for (let r = 1; r < prepared.rows; r++) {
+                renderedLines.push(' ');
               }
             }
           }
@@ -627,11 +625,17 @@ export class TerminalUI {
     const topBound = contentTop;
     const bottomBound = contentTop + contentHeight - 1;
 
+    const clines = (this.messageBox as any)._clines || [];
+
     const placements: Array<{ item: PreparedImage; screenX: number; screenY: number }> = [];
     const placementKeys: string[] = [];
 
     for (const item of this.visibleMediaList) {
-      const relLine = item.lineOffset - scrollOffset;
+      const tag = `__MEDIA_${item.msgId}__`;
+      const actualLineIdx = clines.findIndex((l: string) => l.includes(tag));
+      if (actualLineIdx === -1) continue;
+
+      const relLine = actualLineIdx - scrollOffset;
       const screenY = contentTop + relLine;
       const screenX = contentLeft + 1;
       const screenBottom = screenY + item.prepared.rows - 1;
