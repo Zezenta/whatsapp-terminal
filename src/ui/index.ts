@@ -26,6 +26,10 @@ function sanitizeTextForTui(text: string): string {
     .replace(/[\u200B-\u200F\uFEFF]/g, '');
 }
 
+function blescape(str: string): string {
+  return blessed.escape(str || '');
+}
+
 interface VisibleMedia {
   msgId: string;
   prepared: PreparedImage;
@@ -187,6 +191,7 @@ export class TerminalUI {
       height: 3,
       tags: true,
       inputOnFocus: true,
+      label: ' {gray-fg}Type a message (Press [i/Enter] to type){/} ',
       border: {
         type: 'line'
       },
@@ -196,7 +201,10 @@ export class TerminalUI {
         border: {
           fg: '#555555'
         },
-        fg: 'white'
+        fg: 'white',
+        label: {
+          fg: 'white'
+        }
       }
     });
 
@@ -585,15 +593,19 @@ export class TerminalUI {
       if (this.replyingTo) {
         const snippet = this.replyingTo.text.replace(/\n/g, ' ').slice(0, 35);
         this.header.setContent(` {bold}{cyan-fg}● Replying to ${this.replyingTo.senderName}:{/} "${snippet}..." | {gray-fg}[Enter] Send | [Esc] Cancel{/}`);
+        this.inputBox.setLabel(` {bold}{cyan-fg}Replying to @${this.replyingTo.senderName}:{/} {gray-fg}"${blescape(snippet)}..." [Esc cancel]{/} `);
       } else {
         this.header.setContent(' {bold}{green-fg}● Type Message{/} | {gray-fg}[Enter] Send | [Esc] Cancel{/}');
+        this.inputBox.setLabel(' {bold}{green-fg}Type a message{/} {gray-fg}[Enter send | Esc cancel]{/} ');
       }
     } else if (this.activePanel === 'messages') {
       const selectedMsg = this.selectedMessageIndex >= 0 ? this.currentMessages[this.selectedMessageIndex] : null;
       const reactionInfo = selectedMsg ? ' | [1]👍 [2]❤️ [3]😂 [4]😮 [5]😢 [6]🙏' : '';
       this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply${reactionInfo}{/} | {gray-fg}[Tab] Chats | [o] Image | [q] Quit{/}`);
+      this.inputBox.setLabel(' {gray-fg}Press [i/Enter] to type{/} ');
     } else {
       this.header.setContent(' {bold}{green-fg}● WhatsApp Terminal{/} | {gray-fg}[Tab] Messages | [↑/↓] Select Chat | [i/Enter] Type | [q] Quit{/}');
+      this.inputBox.setLabel(' {gray-fg}Press [i/Enter] to type{/} ');
     }
     this.screen.render();
   }
@@ -878,8 +890,4 @@ export class TerminalUI {
       this.loadMessagesForSelectedChat(true);
     }
   }
-}
-
-function blescape(str: string): string {
-  return blessed.escape(str || '');
 }

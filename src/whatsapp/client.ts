@@ -168,6 +168,16 @@ export class WhatsAppService {
       this.events.onChatsUpdated?.(this.db.getChats());
     });
 
+    this.sock.ev.on('messages.reaction', (reactions) => {
+      for (const r of reactions) {
+        if (r.key?.id) {
+          const emoji = r.reaction.text || '';
+          this.db.updateMessageReaction(r.key.id, emoji);
+        }
+      }
+      this.events.onChatsUpdated?.(this.db.getChats());
+    });
+
     this.sock.ev.on('messaging-history.set', async ({ chats, contacts, messages, lidPnMappings }) => {
       if (lidPnMappings) {
         for (const map of lidPnMappings) {
@@ -284,8 +294,10 @@ export class WhatsAppService {
     let text = '';
     let kind = 'text';
     let mediaPath: string | undefined;
+    let quotedMsgId: string | undefined;
     let quotedText: string | undefined;
     let quotedSender: string | undefined;
+    let reaction: string | undefined;
 
     const msg = m.message;
     if (!msg) return null;
@@ -296,13 +308,30 @@ export class WhatsAppService {
       msg.imageMessage?.contextInfo ||
       msg.videoMessage?.contextInfo ||
       msg.stickerMessage?.contextInfo ||
-      msg.documentMessage?.contextInfo;
+      msg.documentMessage?.contextInfo ||
+      msg.audioMessage?.contextInfo;
 
-    if (contextInfo?.quotedMessage) {
+    if (contextInfo) {
+      quotedMsgId = contextInfo.stanzaId || undefined;
+      const qSender = contextInfo.participant || contextInfo.remoteJid;
+      if (qSender) {
+        quotedSender = this.db.resolveContactName(qSender) || qSender.split('@')[0];
+      }
+
       const q = contextInfo.quotedMessage;
-      quotedText = q.conversation || q.extendedTextMessage?.text || (q.imageMessage ? '[Image]' : '') || (q.stickerMessage ? '[Sticker]' : '') || '[Quoted Message]';
-      const qSender = contextInfo.participant || '';
-      quotedSender = qSender ? (this.db.resolveContactName(qSender) || qSender.split('@')[0]) : undefined;
+      if (q) {
+        quotedText = q.conversation ||
+          q.extendedTextMessage?.text ||
+          (q.imageMessage ? '[Image]' : '') ||
+          (q.stickerMessage ? '[Sticker]' : '') ||
+          (q.videoMessage ? '[Video]' : '') ||
+          (q.documentMessage ? '[Document]' : '') ||
+          '[Quoted Message]';
+      }
+    }
+
+    if (m.reactions && m.reactions.length > 0) {
+      reaction = m.reactions[m.reactions.length - 1].text || undefined;
     }
 
     if (msg.conversation) {
@@ -370,6 +399,8 @@ export class WhatsAppService {
       kind,
       mediaPath,
       rawMsg,
+      reaction,
+      quotedMsgId,
       quotedText,
       quotedSender
     };
@@ -513,6 +544,7 @@ export class WhatsAppService {
       fromMe: true,
       text,
       kind: 'text',
+      quotedMsgId: quotedMsg.id,
       quotedText: quotedMsg.text,
       quotedSender: quotedMsg.senderName
     };

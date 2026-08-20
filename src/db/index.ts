@@ -19,6 +19,7 @@ export class LocalDatabase {
     this.initSchema();
     this.mergeDuplicateLidChats();
     this.linkExistingMediaFiles();
+    this.migrateQuotesAndReactions();
   }
 
   private initSchema() {
@@ -51,6 +52,7 @@ export class LocalDatabase {
         media_preview TEXT,
         raw_msg TEXT,
         reaction TEXT,
+        quoted_msg_id TEXT,
         quoted_text TEXT,
         quoted_sender TEXT
       );
@@ -73,10 +75,77 @@ export class LocalDatabase {
       this.db.exec('ALTER TABLE messages ADD COLUMN reaction TEXT;');
     } catch {}
     try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN quoted_msg_id TEXT;');
+    } catch {}
+    try {
       this.db.exec('ALTER TABLE messages ADD COLUMN quoted_text TEXT;');
     } catch {}
     try {
       this.db.exec('ALTER TABLE messages ADD COLUMN quoted_sender TEXT;');
+    } catch {}
+  }
+
+  public migrateQuotesAndReactions() {
+    try {
+      const messages = this.db.prepare('SELECT id, raw_msg FROM messages WHERE raw_msg IS NOT NULL').all() as Array<{ id: string; raw_msg: string }>;
+      const updateStmt = this.db.prepare('UPDATE messages SET reaction = COALESCE(?, reaction), quoted_msg_id = COALESCE(?, quoted_msg_id), quoted_text = COALESCE(?, quoted_text), quoted_sender = COALESCE(?, quoted_sender) WHERE id = ?');
+      const updateReactionStmt = this.db.prepare('UPDATE messages SET reaction = ? WHERE id = ?');
+
+      for (const m of messages) {
+        try {
+          const raw = JSON.parse(m.raw_msg);
+          const msg = raw.message;
+
+          let reaction: string | null = null;
+          if (raw.reactions && raw.reactions.length > 0) {
+            const lastR = raw.reactions[raw.reactions.length - 1];
+            if (lastR?.text) {
+              reaction = lastR.text;
+            }
+          }
+
+          if (msg?.reactionMessage) {
+            const targetId = msg.reactionMessage.key?.id;
+            const emoji = msg.reactionMessage.text;
+            if (targetId && emoji) {
+              updateReactionStmt.run(emoji, targetId);
+            }
+          }
+
+          const ctx = msg?.extendedTextMessage?.contextInfo ||
+                      msg?.imageMessage?.contextInfo ||
+                      msg?.videoMessage?.contextInfo ||
+                      msg?.stickerMessage?.contextInfo ||
+                      msg?.documentMessage?.contextInfo;
+
+          let quotedMsgId: string | null = null;
+          let quotedSender: string | null = null;
+          let quotedText: string | null = null;
+
+          if (ctx) {
+            quotedMsgId = ctx.stanzaId || null;
+            const qSender = ctx.participant || ctx.remoteJid;
+            if (qSender) {
+              quotedSender = this.resolveContactName(qSender) || qSender.split('@')[0];
+            }
+
+            const q = ctx.quotedMessage;
+            if (q) {
+              quotedText = q.conversation ||
+                           q.extendedTextMessage?.text ||
+                           (q.imageMessage ? '[Image]' : '') ||
+                           (q.stickerMessage ? '[Sticker]' : '') ||
+                           (q.videoMessage ? '[Video]' : '') ||
+                           (q.documentMessage ? '[Document]' : '') ||
+                           '[Quoted Message]';
+            }
+          }
+
+          if (reaction || quotedMsgId || quotedText || quotedSender) {
+            updateStmt.run(reaction, quotedMsgId, quotedText, quotedSender, m.id);
+          }
+        } catch {}
+      }
     } catch {}
   }
 
@@ -293,13 +362,14 @@ export class LocalDatabase {
     }
 
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview, raw_msg, reaction, quoted_text, quoted_sender)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview, raw_msg, reaction, quoted_msg_id, quoted_text, quoted_sender)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         media_path = CASE WHEN excluded.media_path IS NOT NULL AND excluded.media_path != '' THEN excluded.media_path ELSE messages.media_path END,
         media_preview = CASE WHEN excluded.media_preview IS NOT NULL AND excluded.media_preview != '' THEN excluded.media_preview ELSE messages.media_preview END,
         raw_msg = CASE WHEN excluded.raw_msg IS NOT NULL AND excluded.raw_msg != '' THEN excluded.raw_msg ELSE messages.raw_msg END,
         reaction = CASE WHEN excluded.reaction IS NOT NULL THEN excluded.reaction ELSE messages.reaction END,
+        quoted_msg_id = CASE WHEN excluded.quoted_msg_id IS NOT NULL THEN excluded.quoted_msg_id ELSE messages.quoted_msg_id END,
         quoted_text = CASE WHEN excluded.quoted_text IS NOT NULL THEN excluded.quoted_text ELSE messages.quoted_text END,
         quoted_sender = CASE WHEN excluded.quoted_sender IS NOT NULL THEN excluded.quoted_sender ELSE messages.quoted_sender END
     `);
@@ -316,6 +386,7 @@ export class LocalDatabase {
       msg.mediaPreview || null,
       msg.rawMsg || null,
       msg.reaction || null,
+      msg.quotedMsgId || null,
       msg.quotedText || null,
       msg.quotedSender || null
     );
@@ -354,6 +425,7 @@ export class LocalDatabase {
       media_preview?: string;
       raw_msg?: string;
       reaction?: string;
+      quoted_msg_id?: string;
       quoted_text?: string;
       quoted_sender?: string;
     }>;
@@ -377,6 +449,7 @@ export class LocalDatabase {
         mediaPreview: r.media_preview || undefined,
         rawMsg: r.raw_msg || undefined,
         reaction: r.reaction || undefined,
+        quotedMsgId: r.quoted_msg_id || undefined,
         quotedText: r.quoted_text || undefined,
         quotedSender: r.quoted_sender || undefined
       };
@@ -401,6 +474,7 @@ export class LocalDatabase {
       media_preview?: string;
       raw_msg?: string;
       reaction?: string;
+      quoted_msg_id?: string;
       quoted_text?: string;
       quoted_sender?: string;
     } | undefined;
@@ -419,6 +493,7 @@ export class LocalDatabase {
       mediaPreview: row.media_preview || undefined,
       rawMsg: row.raw_msg || undefined,
       reaction: row.reaction || undefined,
+      quotedMsgId: row.quoted_msg_id || undefined,
       quotedText: row.quoted_text || undefined,
       quotedSender: row.quoted_sender || undefined
     };
