@@ -21,6 +21,8 @@ export class TerminalUI {
   private chats: Chat[] = [];
   private selectedChat: Chat | null = null;
   private activePanel: 'chats' | 'messages' | 'input' = 'chats';
+  private chatMessageLimits = new Map<string, number>();
+  private isLoadingOlder = false;
 
   constructor(database: LocalDatabase, whatsapp: WhatsAppService) {
     // 0. Patch Blessed Unicode engine for modern double-width emojis
@@ -225,8 +227,7 @@ export class TerminalUI {
         (this.chatList as any).up(1);
         this.onChatSelectionChanged();
       } else if (this.activePanel === 'messages') {
-        this.messageBox.scroll(-2);
-        this.screen.render();
+        this.handleMessageScrollUp(2);
       }
     });
 
@@ -243,14 +244,27 @@ export class TerminalUI {
     // PageUp / PageDown
     this.screen.key(['pageup'], () => {
       if (this.activePanel === 'messages') {
-        this.messageBox.scroll(-10);
-        this.screen.render();
+        this.handleMessageScrollUp(10);
       }
     });
 
     this.screen.key(['pagedown'], () => {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(10);
+        this.screen.render();
+      }
+    });
+
+    // Mouse wheel scroll on message box
+    this.messageBox.on('wheelup', () => {
+      if (this.activePanel === 'messages') {
+        this.handleMessageScrollUp(3);
+      }
+    });
+
+    this.messageBox.on('wheeldown', () => {
+      if (this.activePanel === 'messages') {
+        this.messageBox.scroll(3);
         this.screen.render();
       }
     });
@@ -285,7 +299,7 @@ export class TerminalUI {
       if (trimmed && this.selectedChat) {
         try {
           await this.waService.sendMessage(this.selectedChat.id, trimmed);
-          this.loadMessagesForSelectedChat();
+          this.loadMessagesForSelectedChat(false);
         } catch (err: any) {
           this.updateStatus('error', err?.message || 'Send failed');
         }
@@ -298,6 +312,49 @@ export class TerminalUI {
       this.inputBox.setValue('');
       this.setFocus('chats');
     });
+  }
+
+  private async handleMessageScrollUp(lines: number) {
+    if (!this.selectedChat) return;
+
+    const currentScroll = this.messageBox.getScroll();
+    if (currentScroll <= 1 && !this.isLoadingOlder) {
+      await this.loadMoreOlderMessages();
+    } else {
+      this.messageBox.scroll(-lines);
+      this.screen.render();
+    }
+  }
+
+  private async loadMoreOlderMessages() {
+    if (!this.selectedChat || this.isLoadingOlder) return;
+    this.isLoadingOlder = true;
+
+    const chatId = this.selectedChat.id;
+    const currentLimit = this.chatMessageLimits.get(chatId) || 50;
+    const countInDb = this.db.getMessageCount(chatId);
+
+    // If we've shown all local messages, fetch older batch from WhatsApp
+    if (currentLimit >= countInDb) {
+      this.updateSyncProgress('Loading older messages from WhatsApp...');
+      await this.waService.fetchOlderMessages(chatId, 50);
+    }
+
+    this.chatMessageLimits.set(chatId, currentLimit + 50);
+
+    const prevScrollHeight = (this.messageBox as any).getScrollHeight();
+    this.loadMessagesForSelectedChat(true);
+    const newScrollHeight = (this.messageBox as any).getScrollHeight();
+
+    const delta = newScrollHeight - prevScrollHeight;
+    if (delta > 0) {
+      this.messageBox.setScroll(delta);
+    } else {
+      this.messageBox.setScroll(0);
+    }
+
+    this.screen.render();
+    this.isLoadingOlder = false;
   }
 
   private openLatestMedia() {
@@ -375,7 +432,7 @@ export class TerminalUI {
       }
       (this.chatList as any).select(newIdx);
       this.selectedChat = this.chats[newIdx];
-      this.loadMessagesForSelectedChat();
+      this.loadMessagesForSelectedChat(false);
     }
 
     this.screen.render();
@@ -385,11 +442,11 @@ export class TerminalUI {
     const selectedIdx = (this.chatList as any).selected;
     if (selectedIdx >= 0 && selectedIdx < this.chats.length) {
       this.selectedChat = this.chats[selectedIdx];
-      this.loadMessagesForSelectedChat();
+      this.loadMessagesForSelectedChat(false);
     }
   }
 
-  public loadMessagesForSelectedChat() {
+  public loadMessagesForSelectedChat(preserveScroll = false) {
     if (!this.selectedChat) {
       this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
       this.messageBox.setContent('No conversation selected');
@@ -401,7 +458,9 @@ export class TerminalUI {
     const escapedChatName = blessed.escape(this.selectedChat.name);
     this.chatHeader.setContent(` {bold}${escapedChatName}{/} {gray-fg}(${isGrp} - ${this.selectedChat.id}){/}`);
 
-    const msgs = this.db.getMessages(this.selectedChat.id, 150);
+    const limit = this.chatMessageLimits.get(this.selectedChat.id) || 50;
+    const msgs = this.db.getMessages(this.selectedChat.id, limit);
+
     if (msgs.length === 0) {
       this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
     } else {
@@ -423,7 +482,9 @@ export class TerminalUI {
       }).join('\n');
 
       this.messageBox.setContent(rendered);
-      this.messageBox.setScrollPerc(100);
+      if (!preserveScroll) {
+        this.messageBox.setScrollPerc(100);
+      }
     }
 
     this.screen.render();
@@ -471,7 +532,7 @@ export class TerminalUI {
 
   public onNewIncomingMessage(msg: Message) {
     if (this.selectedChat && this.selectedChat.id === msg.chatId) {
-      this.loadMessagesForSelectedChat();
+      this.loadMessagesForSelectedChat(true);
     }
   }
 }

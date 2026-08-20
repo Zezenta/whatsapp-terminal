@@ -45,6 +45,7 @@ export class WhatsAppService {
   private isSyncingHistory = false;
   private groupMetaFetching = new Set<string>();
   private downloadingMedia = new Set<string>();
+  private fetchingOlderForChat = new Set<string>();
 
   constructor(database: LocalDatabase, events: WhatsAppServiceEvents = {}, customAuthDir?: string) {
     this.db = database;
@@ -362,6 +363,35 @@ export class WhatsAppService {
       .finally(() => {
         this.downloadingMedia.delete(msgId);
       });
+  }
+
+  public async fetchOlderMessages(chatId: string, count = 50): Promise<number> {
+    if (!this.sock || this.fetchingOlderForChat.has(chatId)) return 0;
+    this.fetchingOlderForChat.add(chatId);
+
+    try {
+      const oldest = this.db.getOldestMessage(chatId);
+      if (!oldest) return 0;
+
+      this.events.onSyncProgress?.(`Fetching older messages for ${chatId.split('@')[0]}...`);
+
+      await this.sock.fetchMessageHistory(
+        count,
+        {
+          remoteJid: oldest.chatId,
+          fromMe: oldest.fromMe,
+          id: oldest.id
+        },
+        oldest.timestamp * 1000
+      );
+
+      this.events.onSyncProgress?.('Older messages loaded');
+      return count;
+    } catch {
+      return 0;
+    } finally {
+      this.fetchingOlderForChat.delete(chatId);
+    }
   }
 
   public async fetchMissingGroupMetadata(chatId: string) {
