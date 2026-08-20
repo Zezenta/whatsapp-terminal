@@ -40,6 +40,7 @@ export class WhatsAppService {
   private events: WhatsAppServiceEvents;
   private isConnecting = false;
   private isSyncingHistory = false;
+  private groupMetaFetching = new Set<string>();
 
   constructor(database: LocalDatabase, events: WhatsAppServiceEvents = {}, customAuthDir?: string) {
     this.db = database;
@@ -55,7 +56,6 @@ export class WhatsAppService {
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] as [number, number, number] }));
 
-    // Log to file rather than stdout to keep Blessed TUI clean
     const logPath = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'debug.log');
     const logger = pino({ level: 'silent' }, pino.destination(logPath));
 
@@ -85,7 +85,6 @@ export class WhatsAppService {
         this.events.onStatusChange?.('connected', userJid);
         this.loadGroupsAndChats();
 
-        // Start background bulk history sync after connection stabilizes
         setTimeout(() => {
           this.startBulkHistorySync();
         }, 3000);
@@ -104,30 +103,51 @@ export class WhatsAppService {
     });
 
     // History sync from WhatsApp
-    this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
-      if (contacts) {
-        for (const c of contacts) {
-          if (!c.id || c.id.endsWith('@newsletter')) continue;
-          const name = c.name || c.notify || c.verifiedName || '';
-          if (name) {
-            this.db.saveChat({
-              id: c.id,
-              name,
-              isGroup: c.id.endsWith('@g.us'),
-              unread: 0,
-              lastMessageTime: 0
+    this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages, lidPnMappings }) => {
+      // 1. Process LID mappings
+      if (lidPnMappings) {
+        for (const map of lidPnMappings) {
+          if (map.lid && map.pn) {
+            const lidClean = map.lid.split('@')[0];
+            const pnClean = map.pn.split('@')[0];
+            this.db.saveContact({
+              id: map.lid,
+              phone: pnClean,
+              lid: lidClean
+            });
+            this.db.saveContact({
+              id: map.pn,
+              phone: pnClean,
+              lid: lidClean
             });
           }
         }
       }
 
+      // 2. Process Contacts
+      if (contacts) {
+        for (const c of contacts) {
+          if (!c.id || c.id.endsWith('@newsletter')) continue;
+          const name = c.name || c.notify || c.verifiedName || '';
+          this.db.saveContact({
+            id: c.id,
+            name: c.name || '',
+            notify: c.notify || c.verifiedName || '',
+            phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
+            lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
+          });
+        }
+      }
+
+      // 3. Process Chats
       if (chats) {
         for (const c of chats) {
           if (!c.id || c.id.endsWith('@newsletter') || c.id === 'status@broadcast') continue;
           const ts = toNumber(c.conversationTimestamp) || toNumber(c.lastMessageRecvTimestamp);
+          const name = c.name || (c as any).displayName || '';
           this.db.saveChat({
             id: c.id,
-            name: c.name || c.id.split('@')[0],
+            name,
             isGroup: c.id.endsWith('@g.us'),
             unread: c.unreadCount || 0,
             lastMessageTime: ts
@@ -135,6 +155,7 @@ export class WhatsAppService {
         }
       }
 
+      // 4. Process Messages
       if (messages) {
         for (const m of messages) {
           const parsed = this.parseMessage(m);
@@ -163,9 +184,10 @@ export class WhatsAppService {
       for (const c of chats) {
         if (!c.id || c.id.endsWith('@newsletter') || c.id === 'status@broadcast') continue;
         const ts = toNumber(c.conversationTimestamp) || toNumber(c.lastMessageRecvTimestamp);
+        const name = c.name || (c as any).displayName || '';
         this.db.saveChat({
           id: c.id,
-          name: c.name || c.id.split('@')[0],
+          name,
           isGroup: c.id.endsWith('@g.us'),
           unread: c.unreadCount || 0,
           lastMessageTime: ts
@@ -177,16 +199,27 @@ export class WhatsAppService {
     this.sock.ev.on('contacts.upsert', (contacts) => {
       for (const c of contacts) {
         if (!c.id || c.id.endsWith('@newsletter')) continue;
-        const name = c.name || c.notify || c.verifiedName || '';
-        if (name) {
-          this.db.saveChat({
-            id: c.id,
-            name,
-            isGroup: c.id.endsWith('@g.us'),
-            unread: 0,
-            lastMessageTime: 0
-          });
-        }
+        this.db.saveContact({
+          id: c.id,
+          name: c.name || '',
+          notify: c.notify || c.verifiedName || '',
+          phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
+          lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
+        });
+      }
+      this.events.onChatsUpdated?.(this.db.getChats());
+    });
+
+    this.sock.ev.on('contacts.update', (updates) => {
+      for (const c of updates) {
+        if (!c.id) continue;
+        this.db.saveContact({
+          id: c.id,
+          name: c.name || '',
+          notify: c.notify || (c as any).verifiedName || '',
+          phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
+          lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
+        });
       }
       this.events.onChatsUpdated?.(this.db.getChats());
     });
@@ -199,9 +232,25 @@ export class WhatsAppService {
     }
 
     const fromMe = Boolean(m.key.fromMe);
-    const senderId = fromMe ? (this.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net' || 'me') : (m.key.participant || chatId);
-    const senderName = m.pushName || (fromMe ? 'Me' : senderId.split('@')[0]);
+    const selfId = this.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net' || 'me';
+    const senderId = fromMe ? selfId : (m.key.participant || chatId);
     const timestamp = toNumber(m.messageTimestamp) || Math.floor(Date.now() / 1000);
+
+    // Save push name into contacts table
+    if (!fromMe && m.pushName && m.pushName !== 'Me') {
+      this.db.saveContact({
+        id: senderId,
+        notify: m.pushName
+      });
+      if (chatId.endsWith('@lid') || chatId.endsWith('@s.whatsapp.net')) {
+        this.db.saveContact({
+          id: chatId,
+          notify: m.pushName
+        });
+      }
+    }
+
+    const senderName = fromMe ? 'Me' : (m.pushName || this.db.resolveContactName(senderId) || senderId.split('@')[0]);
 
     let text = '';
     let kind = 'text';
@@ -235,11 +284,21 @@ export class WhatsAppService {
       text = '[Message]';
     }
 
-    // Update chat info in DB
     const isGroup = chatId.endsWith('@g.us');
+    let chatName = '';
+    if (isGroup) {
+      this.fetchMissingGroupMetadata(chatId);
+    } else {
+      if (!fromMe) {
+        chatName = m.pushName || this.db.resolveContactName(chatId) || '';
+      } else {
+        chatName = this.db.resolveContactName(chatId) || '';
+      }
+    }
+
     this.db.saveChat({
       id: chatId,
-      name: isGroup ? chatId.split('@')[0] : senderName,
+      name: chatName,
       isGroup,
       unread: fromMe ? 0 : 1,
       lastMessageTime: timestamp
@@ -257,19 +316,44 @@ export class WhatsAppService {
     };
   }
 
+  public async fetchMissingGroupMetadata(chatId: string) {
+    if (!this.sock || !chatId.endsWith('@g.us') || this.groupMetaFetching.has(chatId)) return;
+    this.groupMetaFetching.add(chatId);
+
+    try {
+      const meta = await this.sock.groupMetadata(chatId);
+      if (meta.subject) {
+        this.db.saveChat({
+          id: chatId,
+          name: meta.subject,
+          isGroup: true,
+          unread: 0,
+          lastMessageTime: 0
+        });
+        this.events.onChatsUpdated?.(this.db.getChats());
+      }
+    } catch {
+      // Ignored
+    } finally {
+      this.groupMetaFetching.delete(chatId);
+    }
+  }
+
   private async loadGroupsAndChats() {
     if (!this.sock) return;
 
     try {
       const groups = await this.sock.groupFetchAllParticipating();
       for (const [id, group] of Object.entries(groups)) {
-        this.db.saveChat({
-          id,
-          name: group.subject || id.split('@')[0],
-          isGroup: true,
-          unread: 0,
-          lastMessageTime: 0
-        });
+        if (group.subject) {
+          this.db.saveChat({
+            id,
+            name: group.subject,
+            isGroup: true,
+            unread: 0,
+            lastMessageTime: 0
+          });
+        }
       }
       this.events.onChatsUpdated?.(this.db.getChats());
     } catch {
@@ -288,12 +372,14 @@ export class WhatsAppService {
       const totalToSync = Math.min(chats.length, 60);
       this.events.onSyncProgress?.(`Syncing history (${totalToSync} chats)...`);
 
-      // Top 10 chats -> 100 messages
-      // Next 50 chats -> 10 messages
       for (let i = 0; i < totalToSync; i++) {
         const chat = chats[i];
         const targetCount = i < 10 ? 100 : 10;
         const currentCount = this.db.getMessageCount(chat.id);
+
+        if (chat.isGroup) {
+          this.fetchMissingGroupMetadata(chat.id);
+        }
 
         if (currentCount >= targetCount) {
           continue;
@@ -318,7 +404,6 @@ export class WhatsAppService {
             oldest.timestamp * 1000
           );
 
-          // Delay 500ms between requests
           await new Promise((resolve) => setTimeout(resolve, 500));
         } catch {
           // Continue with next chat
