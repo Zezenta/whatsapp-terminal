@@ -1,6 +1,7 @@
 import blessed from 'blessed';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { patchBlessedUnicode } from './unicode-patch.js';
 import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
@@ -22,6 +23,9 @@ export class TerminalUI {
   private activePanel: 'chats' | 'messages' | 'input' = 'chats';
 
   constructor(database: LocalDatabase, whatsapp: WhatsAppService) {
+    // 0. Patch Blessed Unicode engine for modern double-width emojis
+    patchBlessedUnicode();
+
     this.db = database;
     this.waService = whatsapp;
 
