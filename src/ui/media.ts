@@ -15,7 +15,7 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 34, ma
 
     const parsed = path.parse(imageSource);
     const mediaDir = path.dirname(imageSource);
-    const pngPath = path.join(mediaDir, `${parsed.name}.png`);
+    const pngPath = path.join(mediaDir, `${parsed.name}_${maxCols}x${maxRows}.png`);
 
     let pngBuffer: Buffer;
 
@@ -23,7 +23,7 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 34, ma
       pngBuffer = fs.readFileSync(pngPath);
     } else {
       pngBuffer = await sharp(imageSource)
-        .resize(maxCols * 20, maxRows * 40, { fit: 'inside' })
+        .resize(maxCols * 24, maxRows * 48, { fit: 'inside' })
         .png({ quality: 95 })
         .toBuffer();
       fs.writeFileSync(pngPath, pngBuffer);
@@ -44,8 +44,8 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 34, ma
       cols = Math.round(rows * aspect);
     }
 
-    cols = Math.max(8, Math.min(maxCols, cols));
-    rows = Math.max(4, Math.min(maxRows, rows));
+    cols = Math.max(4, Math.min(maxCols, cols));
+    rows = Math.max(2, Math.min(maxRows, rows));
 
     return { pngPath, pngBuffer, cols, rows };
   } catch {

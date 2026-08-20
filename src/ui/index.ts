@@ -556,7 +556,9 @@ export class TerminalUI {
         let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
         renderedLines.push(out);
 
-        const isMedia = m.kind === 'image' || m.kind === 'sticker';
+        const isSticker = m.kind === 'sticker';
+        const isMedia = m.kind === 'image' || isSticker;
+
         if (isMedia) {
           let mediaFile = m.mediaPath;
           if (!mediaFile || !fs.existsSync(mediaFile)) {
@@ -577,7 +579,11 @@ export class TerminalUI {
           }
 
           if (mediaFile && fs.existsSync(mediaFile)) {
-            const prepared = await prepareImageForKitty(mediaFile, 34, 11);
+            // Stickers occupy 75% less height and 75% less width (e.g. 8-10 cols x 3 rows vs 34 cols x 11 rows)
+            const maxCols = isSticker ? 9 : 34;
+            const maxRows = isSticker ? 3 : 11;
+
+            const prepared = await prepareImageForKitty(mediaFile, maxCols, maxRows);
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
