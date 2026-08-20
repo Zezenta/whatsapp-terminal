@@ -9,7 +9,7 @@ export interface PreparedImage {
   rows: number;
 }
 
-export async function prepareImageForKitty(imageSource: string, maxCols = 38, maxRows = 16): Promise<PreparedImage | null> {
+export async function prepareImageForKitty(imageSource: string, maxCols = 36, maxRows = 14): Promise<PreparedImage | null> {
   try {
     if (!fs.existsSync(imageSource)) return null;
 
@@ -23,8 +23,8 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 38, ma
       pngBuffer = fs.readFileSync(pngPath);
     } else {
       pngBuffer = await sharp(imageSource)
-        .resize(maxCols * 24, maxRows * 48, { fit: 'inside' })
-        .png({ quality: 100 })
+        .resize(maxCols * 20, maxRows * 40, { fit: 'inside' })
+        .png({ quality: 95 })
         .toBuffer();
       fs.writeFileSync(pngPath, pngBuffer);
     }
@@ -44,8 +44,8 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 38, ma
       cols = Math.round(rows * aspect);
     }
 
-    cols = Math.max(10, Math.min(maxCols, cols));
-    rows = Math.max(6, Math.min(maxRows, rows));
+    cols = Math.max(8, Math.min(maxCols, cols));
+    rows = Math.max(4, Math.min(maxRows, rows));
 
     return { pngPath, pngBuffer, cols, rows };
   } catch {
@@ -54,16 +54,10 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 38, ma
 }
 
 export function createKittyPlacement(item: PreparedImage, screenX: number, screenY: number): string {
-  // Use t=f with the genuine PNG file on disk for instant native rendering
-  if (item.pngPath && fs.existsSync(item.pngPath)) {
-    const b64Path = Buffer.from(item.pngPath).toString('base64');
-    return `\x1b7\x1b[${screenY};${screenX}H\x1b_Ga=T,f=100,t=f,c=${item.cols},r=${item.rows};${b64Path}\x1b\\\x1b8`;
-  }
+  let out = `\x1b[s\x1b[${screenY};${screenX}H`;
 
-  // Fallback to chunked base64 transmission of PNG buffer
   const b64 = item.pngBuffer.toString('base64');
   const chunkSize = 4096;
-  let out = `\x1b7\x1b[${screenY};${screenX}H`;
 
   for (let i = 0; i < b64.length; i += chunkSize) {
     const chunk = b64.slice(i, i + chunkSize);
@@ -71,16 +65,16 @@ export function createKittyPlacement(item: PreparedImage, screenX: number, scree
     const m = isLast ? 0 : 1;
 
     if (i === 0) {
-      out += `\x1b_Ga=T,f=100,c=${item.cols},r=${item.rows},m=${m};${chunk}\x1b\\`;
+      out += `\x1b_Ga=T,f=100,z=1,q=2,c=${item.cols},r=${item.rows},m=${m};${chunk}\x1b\\`;
     } else {
       out += `\x1b_Gm=${m};${chunk}\x1b\\`;
     }
   }
 
-  out += '\x1b8';
+  out += '\x1b[u';
   return out;
 }
 
 export function clearAllKittyImages(): string {
-  return '\x1b_Ga=d,d=a\x1b\\';
+  return '\x1b_Ga=d,d=a,q=2\x1b\\';
 }

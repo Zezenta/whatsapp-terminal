@@ -217,8 +217,13 @@ export class TerminalUI {
     this.setupKeybindings();
     this.loadCachedChats();
     this.chatList.focus();
+
+    // Hook screen render event to redraw Kitty graphics on every frame
+    this.screen.on('render', () => {
+      this.renderKittyImages();
+    });
+
     this.screen.render();
-    this.renderKittyImages();
   }
 
   private setupKeybindings() {
@@ -254,7 +259,6 @@ export class TerminalUI {
       } else if (this.activePanel === 'messages') {
         this.messageBox.scroll(2);
         this.screen.render();
-        this.renderKittyImages();
       }
     });
 
@@ -268,7 +272,6 @@ export class TerminalUI {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(10);
         this.screen.render();
-        this.renderKittyImages();
       }
     });
 
@@ -282,7 +285,6 @@ export class TerminalUI {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(3);
         this.screen.render();
-        this.renderKittyImages();
       }
     });
 
@@ -337,7 +339,6 @@ export class TerminalUI {
     } else {
       this.messageBox.scroll(-lines);
       this.screen.render();
-      this.renderKittyImages();
     }
   }
 
@@ -368,7 +369,6 @@ export class TerminalUI {
     }
 
     this.screen.render();
-    this.renderKittyImages();
     this.isLoadingOlder = false;
   }
 
@@ -469,7 +469,6 @@ export class TerminalUI {
     }
 
     this.screen.render();
-    this.renderKittyImages();
   }
 
   private loadCachedChats() {
@@ -507,7 +506,6 @@ export class TerminalUI {
     }
 
     this.screen.render();
-    this.renderKittyImages();
   }
 
   private onChatSelectionChanged() {
@@ -524,8 +522,8 @@ export class TerminalUI {
       this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
       this.messageBox.setContent('No conversation selected');
       this.visibleMediaList = [];
-      this.screen.render();
       process.stdout.write(clearAllKittyImages());
+      this.screen.render();
       return;
     }
 
@@ -579,7 +577,7 @@ export class TerminalUI {
           }
 
           if (mediaFile && fs.existsSync(mediaFile)) {
-            const prepared = await prepareImageForKitty(mediaFile, 38, 16);
+            const prepared = await prepareImageForKitty(mediaFile, 36, 14);
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
@@ -587,7 +585,6 @@ export class TerminalUI {
                 lineOffset: currentLineCount
               });
 
-              // Reserve clean line space in the message viewport for the native Kitty graphic
               for (let r = 0; r < prepared.rows; r++) {
                 renderedLines.push('  ');
                 currentLineCount++;
@@ -606,24 +603,28 @@ export class TerminalUI {
     }
 
     this.screen.render();
-    this.renderKittyImages();
   }
 
   private renderKittyImages() {
     process.stdout.write(clearAllKittyImages());
     if (this.visibleMediaList.length === 0 || !this.selectedChat) return;
 
-    const boxTop = (this.messageBox as any).atop + 2;
-    const boxLeft = (this.messageBox as any).aleft + 3;
-    const boxHeight = (this.messageBox as any).height - 2;
-    const scrollOffset = this.messageBox.getScroll();
+    const boxTop = (this.messageBox as any).atop || 4;
+    const boxLeft = (this.messageBox as any).aleft || 25;
+    const boxHeight = (this.messageBox as any).height || 17;
+    const scrollOffset = this.messageBox.getScroll() || 0;
+
+    const contentTop = boxTop + 1;
+    const contentLeft = boxLeft + 2;
+    const visibleHeight = boxHeight - 2;
 
     for (const item of this.visibleMediaList) {
-      const screenY = boxTop + item.lineOffset - scrollOffset + 1;
-      const screenBottom = screenY + item.prepared.rows;
+      const relLine = item.lineOffset - scrollOffset;
 
-      if (screenY >= boxTop + 1 && screenBottom <= boxTop + boxHeight + 2) {
-        const cmd = createKittyPlacement(item.prepared, boxLeft, screenY);
+      if (relLine >= 0 && relLine + item.prepared.rows <= visibleHeight) {
+        const screenY = contentTop + relLine + 1;
+        const screenX = contentLeft + 1;
+        const cmd = createKittyPlacement(item.prepared, screenX, screenY);
         process.stdout.write(cmd);
       }
     }
@@ -662,7 +663,6 @@ export class TerminalUI {
       this.header.setContent(` {bold}{red-fg}● Offline${err}{/} | {gray-fg}Reconnecting...{/}`);
     }
     this.screen.render();
-    this.renderKittyImages();
   }
 
   public updateSyncProgress(info: string) {
