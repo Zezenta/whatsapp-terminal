@@ -17,7 +17,6 @@ export class LocalDatabase {
     this.db.pragma('foreign_keys = ON');
 
     this.initSchema();
-    this.cleanNonContactNames();
   }
 
   private initSchema() {
@@ -54,21 +53,16 @@ export class LocalDatabase {
     `);
   }
 
-  public cleanNonContactNames() {
-    // Clear chat names that are not groups and don't match an address book contact
-    this.db.prepare(`
-      UPDATE chats 
-      SET name = '' 
-      WHERE is_group = 0 
-        AND id NOT IN (SELECT id FROM contacts WHERE name != '')
-    `).run();
+  public getNamedContactsCount(): number {
+    const res = this.db.prepare('SELECT count(*) as c FROM contacts WHERE name IS NOT NULL AND length(name) > 0').get() as { c: number } | undefined;
+    return res?.c || 0;
   }
 
   public saveContact(c: { id: string; name?: string; phone?: string; lid?: string }) {
     if (!c.id) return;
     const existing = this.db.prepare('SELECT * FROM contacts WHERE id = ?').get(c.id) as any;
     
-    // Only accept genuine address book names (not empty, not JIDs, not raw numbers)
+    // Only accept genuine address book names
     let validName = c.name?.trim() || existing?.name || '';
     if (validName === c.id || validName.includes('@') || (/^\d+$/.test(validName) && validName.length > 8) || validName === 'Me') {
       validName = existing?.name || '';
@@ -87,18 +81,21 @@ export class LocalDatabase {
     `).run(c.id, validName, phone, lid);
 
     if (validName) {
+      const phoneJid = phone ? `${phone}@s.whatsapp.net` : '';
+      const lidJid = lid ? `${lid}@lid` : '';
+
       this.db.prepare(`
         UPDATE chats 
         SET name = ? 
         WHERE (id = ? OR id = ? OR id = ?) AND is_group = 0
-      `).run(validName, c.id, phone ? `${phone}@s.whatsapp.net` : '', lid ? `${lid}@lid` : '');
+      `).run(validName, c.id, phoneJid, lidJid);
     }
   }
 
   public resolveContactName(id: string): string {
     if (!id) return '';
 
-    // 1. Check direct ID in contacts for saved phone book name
+    // 1. Direct lookup in contacts table
     const direct = this.db.prepare('SELECT name, phone FROM contacts WHERE id = ?').get(id) as { name?: string; phone?: string } | undefined;
     if (direct?.name && direct.name.trim() !== '') return direct.name.trim();
 

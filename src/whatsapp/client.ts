@@ -53,6 +53,20 @@ export class WhatsAppService {
     if (this.isConnecting) return;
     this.isConnecting = true;
 
+    // Force full address book snapshot if we have few or no saved contact names
+    if (this.db.getNamedContactsCount() < 10 && fs.existsSync(this.authDir)) {
+      try {
+        const files = fs.readdirSync(this.authDir);
+        for (const file of files) {
+          if (file.startsWith('app-state-sync-version-')) {
+            fs.unlinkSync(path.join(this.authDir, file));
+          }
+        }
+      } catch {
+        // Ignored
+      }
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] as [number, number, number] }));
 
@@ -83,11 +97,11 @@ export class WhatsAppService {
         this.isConnecting = false;
         const userJid = this.sock?.user?.id || '';
         this.events.onStatusChange?.('connected', userJid);
-        
+
         // 1. Fetch group subjects
         this.loadGroupsAndChats();
 
-        // 2. Resync AppState to download phone book contact names
+        // 2. Resync AppState to download address book contacts
         try {
           await (this.sock as any)?.resyncAppState?.(['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'], true);
         } catch {
@@ -112,9 +126,43 @@ export class WhatsAppService {
       }
     });
 
-    // History sync from WhatsApp
+    // Address book contacts received from WhatsApp AppState sync
+    this.sock.ev.on('contacts.upsert', (contacts) => {
+      for (const c of contacts) {
+        if (!c.id || c.id.endsWith('@newsletter')) continue;
+        if (c.name) {
+          const pn = c.phoneNumber ? c.phoneNumber.split('@')[0] : (c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '');
+          const lid = c.lid ? c.lid.split('@')[0] : (c.id.endsWith('@lid') ? c.id.split('@')[0] : '');
+          this.db.saveContact({
+            id: c.id,
+            name: c.name,
+            phone: pn,
+            lid
+          });
+        }
+      }
+      this.events.onChatsUpdated?.(this.db.getChats());
+    });
+
+    this.sock.ev.on('contacts.update', (updates) => {
+      for (const c of updates) {
+        if (!c.id) continue;
+        if (c.name) {
+          const pn = (c as any).phoneNumber ? (c as any).phoneNumber.split('@')[0] : (c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '');
+          const lid = (c as any).lid ? (c as any).lid.split('@')[0] : (c.id.endsWith('@lid') ? c.id.split('@')[0] : '');
+          this.db.saveContact({
+            id: c.id,
+            name: c.name,
+            phone: pn,
+            lid
+          });
+        }
+      }
+      this.events.onChatsUpdated?.(this.db.getChats());
+    });
+
+    // History sync
     this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages, lidPnMappings }) => {
-      // 1. Process LID mappings
       if (lidPnMappings) {
         for (const map of lidPnMappings) {
           if (map.lid && map.pn) {
@@ -134,7 +182,6 @@ export class WhatsAppService {
         }
       }
 
-      // 2. Process Contacts (saved phone book names)
       if (contacts) {
         for (const c of contacts) {
           if (!c.id || c.id.endsWith('@newsletter')) continue;
@@ -149,7 +196,6 @@ export class WhatsAppService {
         }
       }
 
-      // 3. Process Chats
       if (chats) {
         for (const c of chats) {
           if (!c.id || c.id.endsWith('@newsletter') || c.id === 'status@broadcast') continue;
@@ -165,7 +211,6 @@ export class WhatsAppService {
         }
       }
 
-      // 4. Process Messages
       if (messages) {
         for (const m of messages) {
           const parsed = this.parseMessage(m);
@@ -202,37 +247,6 @@ export class WhatsAppService {
           unread: c.unreadCount || 0,
           lastMessageTime: ts
         });
-      }
-      this.events.onChatsUpdated?.(this.db.getChats());
-    });
-
-    // Contacts received from phone address book sync
-    this.sock.ev.on('contacts.upsert', (contacts) => {
-      for (const c of contacts) {
-        if (!c.id || c.id.endsWith('@newsletter')) continue;
-        if (c.name) {
-          this.db.saveContact({
-            id: c.id,
-            name: c.name,
-            phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
-            lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
-          });
-        }
-      }
-      this.events.onChatsUpdated?.(this.db.getChats());
-    });
-
-    this.sock.ev.on('contacts.update', (updates) => {
-      for (const c of updates) {
-        if (!c.id) continue;
-        if (c.name) {
-          this.db.saveContact({
-            id: c.id,
-            name: c.name,
-            phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
-            lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
-          });
-        }
       }
       this.events.onChatsUpdated?.(this.db.getChats());
     });
