@@ -60,6 +60,10 @@ export class WhatsAppService {
     this.logger = pino({ level: 'silent' }, pino.destination(logPath));
   }
 
+  public getMediaDir(): string {
+    return this.mediaDir;
+  }
+
   public async connect(): Promise<void> {
     if (this.isConnecting) return;
     this.isConnecting = true;
@@ -426,17 +430,45 @@ export class WhatsAppService {
     }
   }
 
+  public async resyncRecentChatHistory(chatId: string, count = 50): Promise<void> {
+    if (!this.sock) return;
+    const canonicalChatId = this.db.getCanonicalChatId(chatId);
+    const msgs = this.db.getMessages(canonicalChatId, 50);
+    if (msgs.length === 0) return;
+
+    const newest = msgs[msgs.length - 1];
+    try {
+      this.events.onSyncProgress?.(`Fetching media for ${this.db.resolveContactName(canonicalChatId)}...`);
+      await this.sock.fetchMessageHistory(
+        count,
+        {
+          remoteJid: newest.chatId,
+          fromMe: newest.fromMe,
+          id: newest.id
+        },
+        newest.timestamp * 1000
+      );
+    } catch {
+      // Ignored
+    }
+  }
+
   public async syncChatMedia(chatId: string) {
-    const msgs = this.db.getMessages(chatId, 100);
-    const missingRaw = msgs.filter(m => (m.kind === 'image' || m.kind === 'sticker') && !m.mediaPath && !m.rawMsg);
-    
-    if (missingRaw.length > 0) {
-      await this.fetchOlderMessages(chatId, 50);
-    } else {
-      const withRaw = msgs.filter(m => (m.kind === 'image' || m.kind === 'sticker') && !m.mediaPath && m.rawMsg);
-      for (const m of withRaw) {
-        this.downloadMediaForMessage(m.id);
-      }
+    const canonicalChatId = this.db.getCanonicalChatId(chatId);
+    const msgs = this.db.getMessages(canonicalChatId, 50);
+    const mediaMsgs = msgs.filter(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
+
+    const missingMedia = mediaMsgs.filter(m => !m.mediaPath || !fs.existsSync(m.mediaPath));
+    if (missingMedia.length === 0) return;
+
+    const withRaw = missingMedia.filter(m => m.rawMsg);
+    for (const m of withRaw) {
+      this.downloadMediaForMessage(m.id);
+    }
+
+    const withoutRaw = missingMedia.filter(m => !m.rawMsg);
+    if (withoutRaw.length > 0) {
+      await this.resyncRecentChatHistory(canonicalChatId, 50);
     }
   }
 

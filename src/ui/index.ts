@@ -1,5 +1,6 @@
 import blessed from 'blessed';
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import fs from 'node:fs';
 import { patchBlessedUnicode } from './unicode-patch.js';
 import { renderQRToUnicode } from './qr.js';
@@ -384,12 +385,31 @@ export class TerminalUI {
 
     let targetPath = mediaMsg.mediaPath;
     if (!targetPath || !fs.existsSync(targetPath)) {
-      this.header.setContent(' {bold}{yellow-fg}● Downloading image from WhatsApp...{/}');
+      this.header.setContent(' {bold}{yellow-fg}● Downloading media from WhatsApp...{/}');
       this.screen.render();
 
-      const downloaded = await this.waService.downloadMediaForMessage(mediaMsg.id);
-      if (downloaded && fs.existsSync(downloaded)) {
-        targetPath = downloaded;
+      if (mediaMsg.rawMsg) {
+        const dl = await this.waService.downloadMediaForMessage(mediaMsg.id);
+        if (dl && fs.existsSync(dl)) {
+          targetPath = dl;
+        }
+      }
+
+      if (!targetPath || !fs.existsSync(targetPath)) {
+        await this.waService.resyncRecentChatHistory(this.selectedChat.id, 30);
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 200));
+          const checkJpg = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.jpg`);
+          const checkWebp = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.webp`);
+          if (fs.existsSync(checkJpg)) {
+            targetPath = checkJpg;
+            break;
+          }
+          if (fs.existsSync(checkWebp)) {
+            targetPath = checkWebp;
+            break;
+          }
+        }
       }
     }
 
@@ -404,7 +424,7 @@ export class TerminalUI {
         // Ignored
       }
     } else {
-      this.header.setContent(' {bold}{red-fg}● Could not load image file{/}');
+      this.header.setContent(' {bold}{red-fg}● Could not download image from WhatsApp{/}');
       this.screen.render();
     }
   }
