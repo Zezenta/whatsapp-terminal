@@ -6,6 +6,17 @@ import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
 import { WhatsAppService } from '../whatsapp/client.js';
+import { generateAnsiThumbnail } from './media.js';
+
+function formatTimestamp24h(timestamp: number): string {
+  if (!timestamp || timestamp <= 0) return '';
+  const d = new Date(timestamp * 1000);
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  return `${day}/${month} ${hours}:${minutes}`;
+}
 
 export class TerminalUI {
   private screen: blessed.Widgets.Screen;
@@ -51,7 +62,7 @@ export class TerminalUI {
       width: '100%',
       height: 1,
       tags: true,
-      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [o] Open Image | [i/Enter] Type | [q] Quit{/}',
+      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [o] Fullscreen Image | [i/Enter] Type | [q] Quit{/}',
       style: {
         bg: 'black',
         fg: 'white',
@@ -334,7 +345,6 @@ export class TerminalUI {
     const currentLimit = this.chatMessageLimits.get(chatId) || 50;
     const countInDb = this.db.getMessageCount(chatId);
 
-    // If we've shown all local messages, fetch older batch from WhatsApp
     if (currentLimit >= countInDb) {
       this.updateSyncProgress('Loading older messages from WhatsApp...');
       await this.waService.fetchOlderMessages(chatId, 50);
@@ -343,7 +353,7 @@ export class TerminalUI {
     this.chatMessageLimits.set(chatId, currentLimit + 50);
 
     const prevScrollHeight = (this.messageBox as any).getScrollHeight();
-    this.loadMessagesForSelectedChat(true);
+    await this.loadMessagesForSelectedChat(true);
     const newScrollHeight = (this.messageBox as any).getScrollHeight();
 
     const delta = newScrollHeight - prevScrollHeight;
@@ -407,16 +417,7 @@ export class TerminalUI {
     const items = this.chats.map((c) => {
       const isGrp = c.isGroup ? '{blue-fg}[G]{/} ' : '';
       const unread = c.unread > 0 ? ` {yellow-fg}(${c.unread}){/}` : '';
-      let timeStr = '';
-      if (c.lastMessageTime && c.lastMessageTime > 0) {
-        const msgDate = new Date(c.lastMessageTime * 1000);
-        const now = new Date();
-        if (msgDate.toDateString() === now.toDateString()) {
-          timeStr = ` {gray-fg}${msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{/}`;
-        } else {
-          timeStr = ` {gray-fg}${msgDate.toLocaleDateString([], { month: 'numeric', day: 'numeric' })}{/}`;
-        }
-      }
+      const timeStr = c.lastMessageTime > 0 ? ` {gray-fg}${formatTimestamp24h(c.lastMessageTime)}{/}` : '';
       const escapedName = blessed.escape(c.name);
       return `${isGrp}${escapedName}${unread}${timeStr}`;
     });
@@ -446,7 +447,7 @@ export class TerminalUI {
     }
   }
 
-  public loadMessagesForSelectedChat(preserveScroll = false) {
+  public async loadMessagesForSelectedChat(preserveScroll = false) {
     if (!this.selectedChat) {
       this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
       this.messageBox.setContent('No conversation selected');
@@ -464,24 +465,37 @@ export class TerminalUI {
     if (msgs.length === 0) {
       this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
     } else {
-      const rendered = msgs.map((m) => {
-        const time = new Date(m.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const renderedLines: string[] = [];
+
+      for (const m of msgs) {
+        const timeStr = formatTimestamp24h(m.timestamp);
         const senderColor = m.fromMe ? 'cyan-fg' : 'green-fg';
         const senderName = m.fromMe ? 'Me' : m.senderName;
         const escapedSender = blessed.escape(senderName);
         const escapedText = blessed.escape(m.text);
 
-        let out = `{gray-fg}(${time}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
-        if (m.mediaPreview) {
-          out += `\n${m.mediaPreview}`;
-          if (m.mediaPath) {
-            out += `\n  {gray-fg}[Image: ${blessed.escape(m.mediaPath)}] (Press 'o' to open in full screen){/}`;
+        let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
+
+        // Check if we have media preview or need to generate it from mediaPath
+        let preview = m.mediaPreview;
+        if (!preview && m.mediaPath && fs.existsSync(m.mediaPath)) {
+          preview = await generateAnsiThumbnail(m.mediaPath, 34, 16);
+          if (preview) {
+            this.db.saveMessage({
+              ...m,
+              mediaPreview: preview
+            });
           }
         }
-        return out;
-      }).join('\n');
 
-      this.messageBox.setContent(rendered);
+        if (preview) {
+          out += `\n${preview}`;
+        }
+
+        renderedLines.push(out);
+      }
+
+      this.messageBox.setContent(renderedLines.join('\n'));
       if (!preserveScroll) {
         this.messageBox.setScrollPerc(100);
       }
@@ -513,7 +527,7 @@ export class TerminalUI {
     if (status === 'connected') {
       this.hideQR();
       const user = detail ? ` | ${detail.split('@')[0]}` : '';
-      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [o] Open Image | [i/Enter] Type | [q] Quit{/}`);
+      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [o] Fullscreen Image | [i/Enter] Type | [q] Quit{/}`);
     } else if (status === 'qr') {
       this.header.setContent(' {bold}{yellow-fg}● Scan QR Code{/} | {gray-fg}Waiting for phone scan...{/}');
     } else if (status === 'connecting') {
@@ -526,7 +540,7 @@ export class TerminalUI {
   }
 
   public updateSyncProgress(info: string) {
-    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [o] Open Image | [i/Enter] Type | [q] Quit{/}`);
+    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [o] Fullscreen Image | [i/Enter] Type | [q] Quit{/}`);
     this.screen.render();
   }
 

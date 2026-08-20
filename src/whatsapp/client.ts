@@ -164,7 +164,7 @@ export class WhatsAppService {
       this.events.onChatsUpdated?.(this.db.getChats());
     });
 
-    this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages, lidPnMappings }) => {
+    this.sock.ev.on('messaging-history.set', async ({ chats, contacts, messages, lidPnMappings }) => {
       if (lidPnMappings) {
         for (const map of lidPnMappings) {
           if (map.lid && map.pn) {
@@ -215,7 +215,7 @@ export class WhatsAppService {
 
       if (messages) {
         for (const m of messages) {
-          const parsed = this.parseMessage(m);
+          const parsed = await this.parseMessage(m);
           if (parsed) {
             this.db.saveMessage(parsed);
           }
@@ -228,7 +228,7 @@ export class WhatsAppService {
     this.sock.ev.on('messages.upsert', async ({ messages: rawMessages }) => {
       for (const m of rawMessages) {
         if (!m.message) continue;
-        const parsed = this.parseMessage(m);
+        const parsed = await this.parseMessage(m);
         if (parsed) {
           this.db.saveMessage(parsed);
           this.events.onNewMessage?.(parsed);
@@ -254,7 +254,7 @@ export class WhatsAppService {
     });
   }
 
-  private parseMessage(m: WAMessage): Message | null {
+  public async parseMessage(m: WAMessage): Promise<Message | null> {
     const chatId = m.key.remoteJid;
     if (!chatId || chatId === 'status@broadcast' || chatId.endsWith('@newsletter')) {
       return null;
@@ -270,9 +270,12 @@ export class WhatsAppService {
     let text = '';
     let kind = 'text';
     let mediaPath: string | undefined;
+    let mediaPreview: string | undefined;
 
     const msg = m.message;
     if (!msg) return null;
+
+    const msgId = m.key.id || Math.random().toString(36);
 
     if (msg.conversation) {
       text = msg.conversation;
@@ -281,14 +284,23 @@ export class WhatsAppService {
     } else if (msg.imageMessage) {
       text = '[Image]' + (msg.imageMessage.caption ? ` ${msg.imageMessage.caption}` : '');
       kind = 'image';
+      if (msg.imageMessage.jpegThumbnail) {
+        mediaPreview = await generateAnsiThumbnail(Buffer.from(msg.imageMessage.jpegThumbnail), 34, 16);
+      }
       this.triggerMediaDownload(m, 'jpg');
     } else if (msg.stickerMessage) {
       text = '[Sticker]';
       kind = 'sticker';
+      if (msg.stickerMessage.pngThumbnail) {
+        mediaPreview = await generateAnsiThumbnail(Buffer.from(msg.stickerMessage.pngThumbnail), 26, 12);
+      }
       this.triggerMediaDownload(m, 'webp');
     } else if (msg.videoMessage) {
       text = '[Video]' + (msg.videoMessage.caption ? ` ${msg.videoMessage.caption}` : '');
       kind = 'video';
+      if (msg.videoMessage.jpegThumbnail) {
+        mediaPreview = await generateAnsiThumbnail(Buffer.from(msg.videoMessage.jpegThumbnail), 34, 16);
+      }
     } else if (msg.documentMessage) {
       text = `[Document] ${msg.documentMessage.fileName || 'file'}`;
       kind = 'document';
@@ -318,10 +330,12 @@ export class WhatsAppService {
       lastMessageTime: timestamp
     });
 
-    const msgId = m.key.id || Math.random().toString(36);
     const possibleMedia = path.join(this.mediaDir, `${msgId}.${kind === 'sticker' ? 'webp' : 'jpg'}`);
     if (fs.existsSync(possibleMedia)) {
       mediaPath = possibleMedia;
+      if (!mediaPreview) {
+        mediaPreview = await generateAnsiThumbnail(possibleMedia, 34, 16);
+      }
     }
 
     return {
@@ -333,7 +347,8 @@ export class WhatsAppService {
       fromMe,
       text,
       kind,
-      mediaPath
+      mediaPath,
+      mediaPreview
     };
   }
 
@@ -349,9 +364,9 @@ export class WhatsAppService {
     downloadMediaMessage(m, 'buffer', {})
       .then(async (buffer) => {
         fs.writeFileSync(mediaFile, buffer);
-        const preview = await generateAnsiThumbnail(buffer, 28, 12);
+        const preview = await generateAnsiThumbnail(buffer, 34, 16);
         
-        const parsed = this.parseMessage(m);
+        const parsed = await this.parseMessage(m);
         if (parsed) {
           parsed.mediaPath = mediaFile;
           parsed.mediaPreview = preview;

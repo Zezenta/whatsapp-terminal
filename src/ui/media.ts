@@ -1,7 +1,7 @@
 import sharp from 'sharp';
 import fs from 'node:fs';
 
-export async function generateAnsiThumbnail(imageSource: Buffer | string, maxWidth = 32, maxHeight = 16): Promise<string> {
+export async function generateAnsiThumbnail(imageSource: Buffer | string, maxWidth = 34, maxHeight = 16): Promise<string> {
   try {
     let input: Buffer;
     if (typeof imageSource === 'string') {
@@ -10,6 +10,8 @@ export async function generateAnsiThumbnail(imageSource: Buffer | string, maxWid
     } else {
       input = imageSource;
     }
+
+    if (!input || input.length === 0) return '';
 
     const { data, info } = await sharp(input)
       .resize(maxWidth, maxHeight * 2, { fit: 'inside' })
