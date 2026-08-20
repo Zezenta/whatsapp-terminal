@@ -4,7 +4,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   proto,
   WAMessage,
-  WASocket
+  WASocket,
+  downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
+import { generateAnsiThumbnail } from '../ui/media.js';
 
 export interface WhatsAppServiceEvents {
   onQR?: (qr: string) => void;
@@ -37,23 +39,27 @@ export class WhatsAppService {
   private sock: WASocket | null = null;
   private db: LocalDatabase;
   private authDir: string;
+  private mediaDir: string;
   private events: WhatsAppServiceEvents;
   private isConnecting = false;
   private isSyncingHistory = false;
   private groupMetaFetching = new Set<string>();
+  private downloadingMedia = new Set<string>();
 
   constructor(database: LocalDatabase, events: WhatsAppServiceEvents = {}, customAuthDir?: string) {
     this.db = database;
     this.events = events;
     this.authDir = customAuthDir || path.join(os.homedir(), '.config', 'whatsapp-terminal', 'auth_info');
+    this.mediaDir = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'media');
     fs.mkdirSync(this.authDir, { recursive: true });
+    fs.mkdirSync(this.mediaDir, { recursive: true });
   }
 
   public async connect(): Promise<void> {
     if (this.isConnecting) return;
     this.isConnecting = true;
 
-    // Force full address book snapshot if we have few or no saved contact names
+    // Force snapshot if we have no saved contact names
     if (this.db.getNamedContactsCount() < 10 && fs.existsSync(this.authDir)) {
       try {
         const files = fs.readdirSync(this.authDir);
@@ -98,17 +104,14 @@ export class WhatsAppService {
         const userJid = this.sock?.user?.id || '';
         this.events.onStatusChange?.('connected', userJid);
 
-        // 1. Fetch group subjects
         this.loadGroupsAndChats();
 
-        // 2. Resync AppState to download address book contacts
         try {
           await (this.sock as any)?.resyncAppState?.(['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'], true);
         } catch {
           // Ignored
         }
 
-        // 3. Start bulk history sync
         setTimeout(() => {
           this.startBulkHistorySync();
         }, 3000);
@@ -126,7 +129,6 @@ export class WhatsAppService {
       }
     });
 
-    // Address book contacts received from WhatsApp AppState sync
     this.sock.ev.on('contacts.upsert', (contacts) => {
       for (const c of contacts) {
         if (!c.id || c.id.endsWith('@newsletter')) continue;
@@ -161,7 +163,6 @@ export class WhatsAppService {
       this.events.onChatsUpdated?.(this.db.getChats());
     });
 
-    // History sync
     this.sock.ev.on('messaging-history.set', ({ chats, contacts, messages, lidPnMappings }) => {
       if (lidPnMappings) {
         for (const map of lidPnMappings) {
@@ -267,6 +268,7 @@ export class WhatsAppService {
 
     let text = '';
     let kind = 'text';
+    let mediaPath: string | undefined;
 
     const msg = m.message;
     if (!msg) return null;
@@ -278,6 +280,11 @@ export class WhatsAppService {
     } else if (msg.imageMessage) {
       text = '[Image]' + (msg.imageMessage.caption ? ` ${msg.imageMessage.caption}` : '');
       kind = 'image';
+      this.triggerMediaDownload(m, 'jpg');
+    } else if (msg.stickerMessage) {
+      text = '[Sticker]';
+      kind = 'sticker';
+      this.triggerMediaDownload(m, 'webp');
     } else if (msg.videoMessage) {
       text = '[Video]' + (msg.videoMessage.caption ? ` ${msg.videoMessage.caption}` : '');
       kind = 'video';
@@ -287,9 +294,6 @@ export class WhatsAppService {
     } else if (msg.audioMessage) {
       text = '[Audio]';
       kind = 'audio';
-    } else if (msg.stickerMessage) {
-      text = '[Sticker]';
-      kind = 'sticker';
     } else if (msg.pollCreationMessage) {
       text = `[Poll] ${msg.pollCreationMessage.name}`;
       kind = 'poll';
@@ -313,16 +317,51 @@ export class WhatsAppService {
       lastMessageTime: timestamp
     });
 
+    const msgId = m.key.id || Math.random().toString(36);
+    const possibleMedia = path.join(this.mediaDir, `${msgId}.${kind === 'sticker' ? 'webp' : 'jpg'}`);
+    if (fs.existsSync(possibleMedia)) {
+      mediaPath = possibleMedia;
+    }
+
     return {
-      id: m.key.id || Math.random().toString(36),
+      id: msgId,
       chatId,
       senderId,
       senderName,
       timestamp,
       fromMe,
       text,
-      kind
+      kind,
+      mediaPath
     };
+  }
+
+  private triggerMediaDownload(m: WAMessage, ext: string) {
+    const msgId = m.key.id;
+    if (!msgId || this.downloadingMedia.has(msgId)) return;
+
+    const mediaFile = path.join(this.mediaDir, `${msgId}.${ext}`);
+    if (fs.existsSync(mediaFile)) return;
+
+    this.downloadingMedia.add(msgId);
+
+    downloadMediaMessage(m, 'buffer', {})
+      .then(async (buffer) => {
+        fs.writeFileSync(mediaFile, buffer);
+        const preview = await generateAnsiThumbnail(buffer, 28, 12);
+        
+        const parsed = this.parseMessage(m);
+        if (parsed) {
+          parsed.mediaPath = mediaFile;
+          parsed.mediaPreview = preview;
+          this.db.saveMessage(parsed);
+          this.events.onNewMessage?.(parsed);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.downloadingMedia.delete(msgId);
+      });
   }
 
   public async fetchMissingGroupMetadata(chatId: string) {

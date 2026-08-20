@@ -1,4 +1,6 @@
 import blessed from 'blessed';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
@@ -43,10 +45,11 @@ export class TerminalUI {
       width: '100%',
       height: 1,
       tags: true,
-      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch Panel | [i/Enter] Type | [q] Quit{/}',
+      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [o] Open Image | [i/Enter] Type | [q] Quit{/}',
       style: {
         bg: 'black',
-        fg: 'white'
+        fg: 'white',
+        transparent: false
       }
     });
 
@@ -64,8 +67,10 @@ export class TerminalUI {
         type: 'line'
       },
       style: {
+        bg: 'black',
+        transparent: false,
         border: {
-          fg: '#00E676' // Bright green when focused
+          fg: '#00E676'
         },
         selected: {
           bg: '#1E3326',
@@ -73,6 +78,7 @@ export class TerminalUI {
           bold: true
         },
         item: {
+          bg: 'black',
           fg: 'white'
         }
       },
@@ -96,6 +102,8 @@ export class TerminalUI {
         type: 'line'
       },
       style: {
+        bg: 'black',
+        transparent: false,
         border: {
           fg: '#555555'
         },
@@ -117,6 +125,8 @@ export class TerminalUI {
         type: 'line'
       },
       style: {
+        bg: 'black',
+        transparent: false,
         border: {
           fg: '#555555'
         },
@@ -142,15 +152,16 @@ export class TerminalUI {
         type: 'line'
       },
       style: {
+        bg: 'black',
+        transparent: false,
         border: {
           fg: '#555555'
         },
-        fg: 'white',
-        bg: 'black'
+        fg: 'white'
       }
     });
 
-    // 7. QR Code Modal (Hidden by default)
+    // 7. QR Code Modal
     this.qrBox = blessed.box({
       top: 'center',
       left: 'center',
@@ -172,7 +183,7 @@ export class TerminalUI {
       align: 'center'
     });
 
-    // Mount elements to screen
+    // Mount elements
     this.screen.append(this.header);
     this.screen.append(this.chatList);
     this.screen.append(this.chatHeader);
@@ -193,7 +204,7 @@ export class TerminalUI {
       return process.exit(0);
     });
 
-    // Tab Navigation: Toggle focus between Chats and Messages
+    // Tab Navigation
     this.screen.key(['tab'], () => {
       if (this.activePanel === 'input') return;
 
@@ -225,7 +236,7 @@ export class TerminalUI {
       }
     });
 
-    // PageUp / PageDown for messages
+    // PageUp / PageDown
     this.screen.key(['pageup'], () => {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(-10);
@@ -237,6 +248,13 @@ export class TerminalUI {
       if (this.activePanel === 'messages') {
         this.messageBox.scroll(10);
         this.screen.render();
+      }
+    });
+
+    // 'o' or 'v' to open the latest image/sticker in system viewer
+    this.screen.key(['o', 'v'], () => {
+      if (this.activePanel !== 'input' && this.selectedChat) {
+        this.openLatestMedia();
       }
     });
 
@@ -278,10 +296,27 @@ export class TerminalUI {
     });
   }
 
+  private openLatestMedia() {
+    if (!this.selectedChat) return;
+    const msgs = this.db.getMessages(this.selectedChat.id, 50);
+    const mediaMsg = msgs.reverse().find(m => m.mediaPath && fs.existsSync(m.mediaPath));
+
+    if (mediaMsg && mediaMsg.mediaPath) {
+      try {
+        const viewer = fs.existsSync('/usr/bin/imv') ? 'imv' : 'xdg-open';
+        const child = spawn(viewer, [mediaMsg.mediaPath], { detached: true, stdio: 'ignore' });
+        child.unref();
+        this.header.setContent(` {bold}{green-fg}● Opened media in ${viewer}:{/} {gray-fg}${mediaMsg.mediaPath}{/}`);
+        this.screen.render();
+      } catch {
+        // Ignored
+      }
+    }
+  }
+
   private setFocus(panel: 'chats' | 'messages' | 'input') {
     this.activePanel = panel;
 
-    // Update border highlights
     this.chatList.style.border.fg = panel === 'chats' ? '#00E676' : '#555555';
     this.messageBox.style.border.fg = panel === 'messages' ? '#00E676' : '#555555';
     this.inputBox.style.border.fg = panel === 'input' ? '#00E676' : '#555555';
@@ -321,7 +356,8 @@ export class TerminalUI {
           timeStr = ` {gray-fg}${msgDate.toLocaleDateString([], { month: 'numeric', day: 'numeric' })}{/}`;
         }
       }
-      return `${isGrp}${c.name}${unread}${timeStr}`;
+      const escapedName = blessed.escape(c.name);
+      return `${isGrp}${escapedName}${unread}${timeStr}`;
     });
 
     this.chatList.setItems(items);
@@ -358,7 +394,8 @@ export class TerminalUI {
     }
 
     const isGrp = this.selectedChat.isGroup ? 'Group' : 'Direct';
-    this.chatHeader.setContent(` {bold}${this.selectedChat.name}{/} {gray-fg}(${isGrp} - ${this.selectedChat.id}){/}`);
+    const escapedChatName = blessed.escape(this.selectedChat.name);
+    this.chatHeader.setContent(` {bold}${escapedChatName}{/} {gray-fg}(${isGrp} - ${this.selectedChat.id}){/}`);
 
     const msgs = this.db.getMessages(this.selectedChat.id, 150);
     if (msgs.length === 0) {
@@ -368,11 +405,21 @@ export class TerminalUI {
         const time = new Date(m.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const senderColor = m.fromMe ? 'cyan-fg' : 'green-fg';
         const senderName = m.fromMe ? 'Me' : m.senderName;
-        return `{gray-fg}(${time}){/} {${senderColor}}{bold}${senderName}:{/} ${m.text}`;
+        const escapedSender = blessed.escape(senderName);
+        const escapedText = blessed.escape(m.text);
+
+        let out = `{gray-fg}(${time}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
+        if (m.mediaPreview) {
+          out += `\n${m.mediaPreview}`;
+          if (m.mediaPath) {
+            out += `\n  {gray-fg}[Image: ${blessed.escape(m.mediaPath)}] (Press 'o' to open in full screen){/}`;
+          }
+        }
+        return out;
       }).join('\n');
 
       this.messageBox.setContent(rendered);
-      this.messageBox.setScrollPerc(100); // Scroll to bottom
+      this.messageBox.setScrollPerc(100);
     }
 
     this.screen.render();
@@ -401,7 +448,7 @@ export class TerminalUI {
     if (status === 'connected') {
       this.hideQR();
       const user = detail ? ` | ${detail.split('@')[0]}` : '';
-      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch Panel | [i/Enter] Type | [q] Quit{/}`);
+      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [o] Open Image | [i/Enter] Type | [q] Quit{/}`);
     } else if (status === 'qr') {
       this.header.setContent(' {bold}{yellow-fg}● Scan QR Code{/} | {gray-fg}Waiting for phone scan...{/}');
     } else if (status === 'connecting') {
@@ -414,7 +461,7 @@ export class TerminalUI {
   }
 
   public updateSyncProgress(info: string) {
-    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [i/Enter] Type | [q] Quit{/}`);
+    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [o] Open Image | [i/Enter] Type | [q] Quit{/}`);
     this.screen.render();
   }
 

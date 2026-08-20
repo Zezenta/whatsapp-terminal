@@ -45,13 +45,22 @@ export class LocalDatabase {
         timestamp INTEGER,
         from_me INTEGER,
         text TEXT,
-        kind TEXT
+        kind TEXT,
+        media_path TEXT,
+        media_preview TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_contacts_lid ON contacts(lid);
       CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
     `);
+
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN media_path TEXT;');
+    } catch {}
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN media_preview TEXT;');
+    } catch {}
   }
 
   public getCanonicalChatId(id: string): string {
@@ -60,7 +69,6 @@ export class LocalDatabase {
       return id;
     }
 
-    // If ID is LID (e.g. 9083922985052@lid), map to canonical Phone Number JID
     if (id.endsWith('@lid')) {
       const lidUser = id.split('@')[0];
       const contact = this.db.prepare('SELECT phone FROM contacts WHERE lid = ? OR id = ?').get(lidUser, id) as { phone?: string } | undefined;
@@ -69,7 +77,6 @@ export class LocalDatabase {
       }
     }
 
-    // If ID is Phone Number JID (e.g. 593984973460:0@s.whatsapp.net)
     if (id.endsWith('@s.whatsapp.net')) {
       const pnUser = id.split('@')[0].split(':')[0];
       return `${pnUser}@s.whatsapp.net`;
@@ -89,10 +96,8 @@ export class LocalDatabase {
       const pnJid = `${c.phone}@s.whatsapp.net`;
       const lidJid = `${c.lid}@lid`;
 
-      // 1. Move all messages from LID chat to canonical Phone chat
       this.db.prepare('UPDATE messages SET chat_id = ? WHERE chat_id = ?').run(pnJid, lidJid);
 
-      // 2. Merge timestamps and delete duplicate LID chat
       const lidChat = this.db.prepare('SELECT last_message_time, unread FROM chats WHERE id = ?').get(lidJid) as { last_message_time: number; unread: number } | undefined;
       if (lidChat) {
         this.db.prepare(`
@@ -148,11 +153,9 @@ export class LocalDatabase {
   public resolveContactName(id: string): string {
     if (!id) return '';
 
-    // 1. Direct lookup in contacts table
     const direct = this.db.prepare('SELECT name, phone FROM contacts WHERE id = ?').get(id) as { name?: string; phone?: string } | undefined;
     if (direct?.name && direct.name.trim() !== '') return direct.name.trim();
 
-    // 2. If ID is LID (e.g. 12345@lid)
     if (id.endsWith('@lid')) {
       const lidUser = id.split('@')[0];
       const byLid = this.db.prepare('SELECT name, phone FROM contacts WHERE lid = ? OR id = ?').get(lidUser, id) as any;
@@ -161,7 +164,6 @@ export class LocalDatabase {
       return `+${lidUser}`;
     }
 
-    // 3. If ID is Phone Number JID (e.g. 5939...@s.whatsapp.net)
     if (id.endsWith('@s.whatsapp.net')) {
       const pnUser = id.split('@')[0].split(':')[0];
       const byPhone = this.db.prepare('SELECT name FROM contacts WHERE phone = ? OR id = ?').get(pnUser, id) as any;
@@ -258,8 +260,11 @@ export class LocalDatabase {
     }
 
     const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        media_path = CASE WHEN excluded.media_path IS NOT NULL AND excluded.media_path != '' THEN excluded.media_path ELSE messages.media_path END,
+        media_preview = CASE WHEN excluded.media_preview IS NOT NULL AND excluded.media_preview != '' THEN excluded.media_preview ELSE messages.media_preview END
     `);
     stmt.run(
       msg.id,
@@ -269,7 +274,9 @@ export class LocalDatabase {
       msg.timestamp,
       msg.fromMe ? 1 : 0,
       msg.text,
-      msg.kind
+      msg.kind,
+      msg.mediaPath || null,
+      msg.mediaPreview || null
     );
 
     this.db.prepare(`
@@ -293,6 +300,8 @@ export class LocalDatabase {
       from_me: number;
       text: string;
       kind: string;
+      media_path?: string;
+      media_preview?: string;
     }>;
 
     return rows.map(r => {
@@ -309,7 +318,9 @@ export class LocalDatabase {
         timestamp: r.timestamp,
         fromMe: Boolean(r.from_me),
         text: r.text,
-        kind: r.kind
+        kind: r.kind,
+        mediaPath: r.media_path || undefined,
+        mediaPreview: r.media_preview || undefined
       };
     });
   }
@@ -328,6 +339,8 @@ export class LocalDatabase {
       from_me: number;
       text: string;
       kind: string;
+      media_path?: string;
+      media_preview?: string;
     } | undefined;
 
     if (!row) return null;
@@ -339,7 +352,9 @@ export class LocalDatabase {
       timestamp: row.timestamp,
       fromMe: Boolean(row.from_me),
       text: row.text,
-      kind: row.kind
+      kind: row.kind,
+      mediaPath: row.media_path || undefined,
+      mediaPreview: row.media_preview || undefined
     };
   }
 

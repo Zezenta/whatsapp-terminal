@@ -15,6 +15,8 @@ export interface Message {
   fromMe: boolean;
   text: string;
   kind: string;
+  mediaPath?: string;
+  mediaPreview?: string;
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'qr' | 'connected' | 'error';
