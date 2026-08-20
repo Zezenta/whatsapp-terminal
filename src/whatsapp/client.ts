@@ -37,6 +37,7 @@ function toNumber(t: any): number {
 
 export class WhatsAppService {
   private sock: WASocket | null = null;
+  private logger: any;
   private db: LocalDatabase;
   private authDir: string;
   private mediaDir: string;
@@ -54,6 +55,9 @@ export class WhatsAppService {
     this.mediaDir = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'media');
     fs.mkdirSync(this.authDir, { recursive: true });
     fs.mkdirSync(this.mediaDir, { recursive: true });
+
+    const logPath = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'debug.log');
+    this.logger = pino({ level: 'silent' }, pino.destination(logPath));
   }
 
   public async connect(): Promise<void> {
@@ -77,12 +81,9 @@ export class WhatsAppService {
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] as [number, number, number] }));
 
-    const logPath = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'debug.log');
-    const logger = pino({ level: 'silent' }, pino.destination(logPath));
-
     this.sock = makeWASocket({
       version,
-      logger,
+      logger: this.logger,
       printQRInTerminal: false,
       auth: state,
       generateHighQualityLinkPreview: true,
@@ -367,7 +368,10 @@ export class WhatsAppService {
 
     this.downloadingMedia.add(msgId);
 
-    downloadMediaMessage(m, 'buffer', {})
+    downloadMediaMessage(m, 'buffer', {}, {
+      logger: this.logger,
+      reuploadRequest: (msg) => this.sock!.updateMediaMessage(msg)
+    })
       .then(async (buffer) => {
         fs.writeFileSync(mediaFile, buffer);
         const preview = await generateAnsiThumbnail(buffer, 34, 16);
@@ -401,7 +405,10 @@ export class WhatsAppService {
       const ext = isSticker ? 'webp' : 'jpg';
       const targetFile = path.join(this.mediaDir, `${msgId}.${ext}`);
 
-      const buffer = await downloadMediaMessage(m, 'buffer', {});
+      const buffer = await downloadMediaMessage(m, 'buffer', {}, {
+        logger: this.logger,
+        reuploadRequest: (msg) => this.sock!.updateMediaMessage(msg)
+      });
       fs.writeFileSync(targetFile, buffer);
 
       const preview = await generateAnsiThumbnail(buffer, 34, 16);
@@ -419,6 +426,20 @@ export class WhatsAppService {
     }
   }
 
+  public async syncChatMedia(chatId: string) {
+    const msgs = this.db.getMessages(chatId, 100);
+    const missingRaw = msgs.filter(m => (m.kind === 'image' || m.kind === 'sticker') && !m.mediaPath && !m.rawMsg);
+    
+    if (missingRaw.length > 0) {
+      await this.fetchOlderMessages(chatId, 50);
+    } else {
+      const withRaw = msgs.filter(m => (m.kind === 'image' || m.kind === 'sticker') && !m.mediaPath && m.rawMsg);
+      for (const m of withRaw) {
+        this.downloadMediaForMessage(m.id);
+      }
+    }
+  }
+
   public async fetchOlderMessages(chatId: string, count = 50): Promise<number> {
     if (!this.sock || this.fetchingOlderForChat.has(chatId)) return 0;
     this.fetchingOlderForChat.add(chatId);
@@ -427,7 +448,7 @@ export class WhatsAppService {
       const oldest = this.db.getOldestMessage(chatId);
       if (!oldest) return 0;
 
-      this.events.onSyncProgress?.(`Fetching older messages for ${chatId.split('@')[0]}...`);
+      this.events.onSyncProgress?.(`Fetching history for ${chatId.split('@')[0]}...`);
 
       await this.sock.fetchMessageHistory(
         count,
@@ -439,7 +460,7 @@ export class WhatsAppService {
         oldest.timestamp * 1000
       );
 
-      this.events.onSyncProgress?.('Older messages loaded');
+      this.events.onSyncProgress?.('Messages loaded');
       return count;
     } catch {
       return 0;

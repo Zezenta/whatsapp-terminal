@@ -6,7 +6,7 @@ import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
 import { WhatsAppService } from '../whatsapp/client.js';
-import { prepareImageForKitty, createKittyPlacement, clearAllKittyImages, generateAnsiThumbnail } from './media.js';
+import { prepareImageForKitty, createKittyPlacement, clearAllKittyImages, generateAnsiThumbnail, PreparedImage } from './media.js';
 
 function formatTimestamp24h(timestamp: number): string {
   if (!timestamp || timestamp <= 0) return '';
@@ -27,10 +27,8 @@ function sanitizeTextForTui(text: string): string {
 
 interface VisibleMedia {
   msgId: string;
-  pngBuffer: Buffer;
+  prepared: PreparedImage;
   lineOffset: number;
-  cols: number;
-  rows: number;
 }
 
 export class TerminalUI {
@@ -473,6 +471,7 @@ export class TerminalUI {
     if (selectedIdx >= 0 && selectedIdx < this.chats.length) {
       this.selectedChat = this.chats[selectedIdx];
       this.loadMessagesForSelectedChat(false);
+      this.waService.syncChatMedia(this.selectedChat.id);
     }
   }
 
@@ -517,10 +516,8 @@ export class TerminalUI {
 
         const isMedia = m.kind === 'image' || m.kind === 'sticker';
         if (isMedia) {
-          // Check if file exists or download it
           let mediaFile = m.mediaPath;
           if (!mediaFile || !fs.existsSync(mediaFile)) {
-            // Trigger async download if we have rawMsg
             if (m.rawMsg) {
               this.waService.downloadMediaForMessage(m.id).then((dl) => {
                 if (dl) {
@@ -535,13 +532,10 @@ export class TerminalUI {
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
-                pngBuffer: prepared.pngBuffer,
-                lineOffset: currentLineCount,
-                cols: prepared.cols,
-                rows: prepared.rows
+                prepared,
+                lineOffset: currentLineCount
               });
 
-              // Reserve space in messageBox
               for (let r = 0; r < prepared.rows; r++) {
                 renderedLines.push('  ');
                 currentLineCount++;
@@ -577,10 +571,10 @@ export class TerminalUI {
 
     for (const item of this.visibleMediaList) {
       const screenY = boxTop + item.lineOffset - scrollOffset;
-      const screenBottom = screenY + item.rows;
+      const screenBottom = screenY + item.prepared.rows;
 
       if (screenY >= boxTop && screenBottom <= boxTop + boxHeight + 1) {
-        const cmd = createKittyPlacement(item.pngBuffer, boxLeft, screenY, item.cols, item.rows);
+        const cmd = createKittyPlacement(item.prepared, boxLeft, screenY);
         process.stdout.write(cmd);
       }
     }
