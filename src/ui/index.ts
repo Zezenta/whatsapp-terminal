@@ -91,7 +91,7 @@ export class TerminalUI {
       width: '100%',
       height: 1,
       tags: true,
-      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [1-6] React | [o] Image | [q] Quit{/}',
+      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [1-6] React | [o/O] Image | [q] Quit{/}',
       style: {
         bg: 'black',
         fg: 'white',
@@ -344,9 +344,13 @@ export class TerminalUI {
       });
     }
 
-    this.screen.key(['o', 'v'], async () => {
+    // Open image of selected message (or latest media in chat)
+    this.screen.key(['o', 'O', 'v', 'V'], async () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
-        await this.openLatestMedia();
+        const selectedMsg = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
+          ? this.currentMessages[this.selectedMessageIndex]
+          : null;
+        await this.openMedia(selectedMsg);
       }
     });
 
@@ -498,48 +502,46 @@ export class TerminalUI {
     this.isLoadingOlder = false;
   }
 
-  private async openLatestMedia() {
+  private async openMedia(targetMsg?: Message | null) {
     if (!this.selectedChat) return;
     try {
-      const msgs = this.db.getMessages(this.selectedChat.id, 50);
-      const mediaMsgs = msgs.slice().reverse().filter(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
+      let mediaMsg: Message | undefined;
 
-      if (mediaMsgs.length === 0) {
-        this.header.setContent(' {bold}{yellow-fg}● No media found in this chat{/}');
-        this.screen.render();
-        return;
+      if (targetMsg && (targetMsg.kind === 'image' || targetMsg.kind === 'sticker' || targetMsg.kind === 'video')) {
+        mediaMsg = targetMsg;
+      } else {
+        const msgs = this.db.getMessages(this.selectedChat.id, 50);
+        const mediaMsgs = msgs.slice().reverse().filter(m => m.kind === 'image' || m.kind === 'sticker' || m.kind === 'video');
+
+        if (mediaMsgs.length === 0) {
+          this.header.setContent(' {bold}{yellow-fg}● No media found in this chat{/}');
+          this.screen.render();
+          return;
+        }
+        mediaMsg = mediaMsgs[0];
       }
 
       let targetPath: string | undefined;
 
-      for (const m of mediaMsgs) {
-        if (m.mediaPath && fs.existsSync(m.mediaPath)) {
-          targetPath = m.mediaPath;
-          break;
-        }
-        const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
-        const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
-        if (fs.existsSync(checkJpg)) {
-          targetPath = checkJpg;
-          break;
-        }
-        if (fs.existsSync(checkWebp)) {
-          targetPath = checkWebp;
-          break;
-        }
+      if (mediaMsg.mediaPath && fs.existsSync(mediaMsg.mediaPath)) {
+        targetPath = mediaMsg.mediaPath;
+      } else {
+        const checkJpg = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.jpg`);
+        const checkWebp = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.webp`);
+        const checkMp4 = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.mp4`);
+        if (fs.existsSync(checkJpg)) targetPath = checkJpg;
+        else if (fs.existsSync(checkWebp)) targetPath = checkWebp;
+        else if (fs.existsSync(checkMp4)) targetPath = checkMp4;
       }
 
       if (!targetPath) {
-        this.header.setContent(' {bold}{yellow-fg}● Downloading media from WhatsApp...{/}');
+        this.header.setContent(` {bold}{yellow-fg}● Downloading media for ${mediaMsg.senderName}...{/}`);
         this.screen.render();
 
-        for (const m of mediaMsgs) {
-          if (m.rawMsg) {
-            const dl = await this.waService.downloadMediaForMessage(m.id);
-            if (dl && fs.existsSync(dl)) {
-              targetPath = dl;
-              break;
-            }
+        if (mediaMsg.rawMsg) {
+          const dl = await this.waService.downloadMediaForMessage(mediaMsg.id);
+          if (dl && fs.existsSync(dl)) {
+            targetPath = dl;
           }
         }
 
@@ -547,19 +549,21 @@ export class TerminalUI {
           await this.waService.resyncRecentChatHistory(this.selectedChat.id, 30);
           for (let i = 0; i < 20; i++) {
             await new Promise(r => setTimeout(r, 200));
-            for (const m of mediaMsgs) {
-              const checkJpg = path.join(this.waService.getMediaDir(), `${m.id}.jpg`);
-              const checkWebp = path.join(this.waService.getMediaDir(), `${m.id}.webp`);
-              if (fs.existsSync(checkJpg)) {
-                targetPath = checkJpg;
-                break;
-              }
-              if (fs.existsSync(checkWebp)) {
-                targetPath = checkWebp;
-                break;
-              }
+            const checkJpg = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.jpg`);
+            const checkWebp = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.webp`);
+            const checkMp4 = path.join(this.waService.getMediaDir(), `${mediaMsg.id}.mp4`);
+            if (fs.existsSync(checkJpg)) {
+              targetPath = checkJpg;
+              break;
             }
-            if (targetPath) break;
+            if (fs.existsSync(checkWebp)) {
+              targetPath = checkWebp;
+              break;
+            }
+            if (fs.existsSync(checkMp4)) {
+              targetPath = checkMp4;
+              break;
+            }
           }
         }
       }
@@ -573,7 +577,7 @@ export class TerminalUI {
             this.screen.render();
           });
           child.unref();
-          this.header.setContent(` {bold}{green-fg}● Opened image in ${viewer}:{/} {gray-fg}${targetPath}{/}`);
+          this.header.setContent(` {bold}{green-fg}● Opened ${mediaMsg.kind} (${mediaMsg.senderName}) in ${viewer}:{/} {gray-fg}${path.basename(targetPath)}{/}`);
           this.screen.render();
         } catch {
           // Ignored
@@ -619,7 +623,7 @@ export class TerminalUI {
     } else if (this.activePanel === 'messages') {
       const selectedMsg = this.selectedMessageIndex >= 0 ? this.currentMessages[this.selectedMessageIndex] : null;
       const reactionInfo = selectedMsg ? ' | [1]👍 [2]❤️ [3]😂 [4]😮 [5]😢 [6]🙏' : '';
-      this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply${reactionInfo}{/} | {gray-fg}[Tab] Chats | [o] Image | [q] Quit{/}`);
+      this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply | [o/O] Open Media${reactionInfo}{/} | {gray-fg}[Tab] Chats | [q] Quit{/}`);
       this.inputBox.setLabel(' {gray-fg}Press [i/Enter] to type{/} ');
     } else {
       this.header.setContent(' {bold}{green-fg}● WhatsApp Terminal{/} | {gray-fg}[Tab] Messages | [↑/↓] Select Chat | [i/Enter] Type | [q] Quit{/}');
@@ -886,7 +890,7 @@ export class TerminalUI {
     if (status === 'connected') {
       this.hideQR();
       const user = detail ? ` | ${detail.split('@')[0]}` : '';
-      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [1-6] React | [q] Quit{/}`);
+      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [o/O] Image | [q] Quit{/}`);
     } else if (status === 'qr') {
       this.header.setContent(' {bold}{yellow-fg}● Scan QR Code{/} | {gray-fg}Waiting for phone scan...{/}');
     } else if (status === 'connecting') {

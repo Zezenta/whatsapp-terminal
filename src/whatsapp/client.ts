@@ -35,6 +35,34 @@ function toNumber(t: any): number {
   return isNaN(parsed) ? 0 : parsed;
 }
 
+function unwrapMessage(msg: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
+  if (!msg) return msg;
+  let unwrapped: any = msg;
+  while (
+    unwrapped.ephemeralMessage?.message ||
+    unwrapped.viewOnceMessage?.message ||
+    unwrapped.viewOnceMessageV2?.message ||
+    unwrapped.viewOnceMessageV2Extension?.message ||
+    unwrapped.documentWithCaptionMessage?.message ||
+    unwrapped.ptvMessage?.message ||
+    unwrapped.templateMessage?.hydratedTemplate ||
+    unwrapped.templateMessage?.hydratedFourRowTemplate ||
+    unwrapped.interactiveMessage?.header
+  ) {
+    unwrapped =
+      unwrapped.ephemeralMessage?.message ||
+      unwrapped.viewOnceMessage?.message ||
+      unwrapped.viewOnceMessageV2?.message ||
+      unwrapped.viewOnceMessageV2Extension?.message ||
+      unwrapped.documentWithCaptionMessage?.message ||
+      unwrapped.ptvMessage?.message ||
+      unwrapped.templateMessage?.hydratedTemplate ||
+      unwrapped.templateMessage?.hydratedFourRowTemplate ||
+      unwrapped.interactiveMessage?.header;
+  }
+  return unwrapped;
+}
+
 export class WhatsAppService {
   private sock: WASocket | null = null;
   private logger: any;
@@ -299,8 +327,16 @@ export class WhatsAppService {
     let quotedSender: string | undefined;
     let reaction: string | undefined;
 
-    const msg = m.message;
-    if (!msg) return null;
+    const rawMsgObj = m.message;
+    if (!rawMsgObj) return null;
+
+    const isViewOnce = Boolean(
+      rawMsgObj.viewOnceMessage ||
+      rawMsgObj.viewOnceMessageV2 ||
+      rawMsgObj.viewOnceMessageV2Extension
+    );
+
+    const msg = unwrapMessage(rawMsgObj) || rawMsgObj;
 
     const msgId = m.key.id || Math.random().toString(36);
 
@@ -320,12 +356,13 @@ export class WhatsAppService {
 
       const q = contextInfo.quotedMessage;
       if (q) {
-        quotedText = q.conversation ||
-          q.extendedTextMessage?.text ||
-          (q.imageMessage ? '[Image]' : '') ||
-          (q.stickerMessage ? '[Sticker]' : '') ||
-          (q.videoMessage ? '[Video]' : '') ||
-          (q.documentMessage ? '[Document]' : '') ||
+        const unwrappedQuoted = unwrapMessage(q) || q;
+        quotedText = unwrappedQuoted.conversation ||
+          unwrappedQuoted.extendedTextMessage?.text ||
+          (unwrappedQuoted.imageMessage ? '[Image]' : '') ||
+          (unwrappedQuoted.stickerMessage ? '[Sticker]' : '') ||
+          (unwrappedQuoted.videoMessage ? '[Video]' : '') ||
+          (unwrappedQuoted.documentMessage ? '[Document]' : '') ||
           '[Quoted Message]';
       }
     }
@@ -334,12 +371,14 @@ export class WhatsAppService {
       reaction = m.reactions[m.reactions.length - 1].text || undefined;
     }
 
+    const viewOnceTag = isViewOnce ? ' [1x View Once]' : '';
+
     if (msg.conversation) {
       text = msg.conversation;
     } else if (msg.extendedTextMessage?.text) {
       text = msg.extendedTextMessage.text;
     } else if (msg.imageMessage) {
-      text = '[Image]' + (msg.imageMessage.caption ? ` ${msg.imageMessage.caption}` : '');
+      text = '[Image]' + (msg.imageMessage.caption ? ` ${msg.imageMessage.caption}` : '') + viewOnceTag;
       kind = 'image';
       this.triggerMediaDownload(m, 'jpg');
     } else if (msg.stickerMessage) {
@@ -347,19 +386,20 @@ export class WhatsAppService {
       kind = 'sticker';
       this.triggerMediaDownload(m, 'webp');
     } else if (msg.videoMessage) {
-      text = '[Video]' + (msg.videoMessage.caption ? ` ${msg.videoMessage.caption}` : '');
+      text = '[Video]' + (msg.videoMessage.caption ? ` ${msg.videoMessage.caption}` : '') + viewOnceTag;
       kind = 'video';
+      this.triggerMediaDownload(m, 'mp4');
     } else if (msg.documentMessage) {
       text = `[Document] ${msg.documentMessage.fileName || 'file'}`;
       kind = 'document';
     } else if (msg.audioMessage) {
-      text = '[Audio]';
+      text = '[Audio]' + viewOnceTag;
       kind = 'audio';
     } else if (msg.pollCreationMessage) {
       text = `[Poll] ${msg.pollCreationMessage.name}`;
       kind = 'poll';
     } else {
-      text = '[Message]';
+      text = '[Message]' + viewOnceTag;
     }
 
     const isGroup = chatId.endsWith('@g.us');
@@ -423,7 +463,9 @@ export class WhatsAppService {
         const tempFile = `${mediaFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
         fs.writeFileSync(tempFile, buffer);
         fs.renameSync(tempFile, mediaFile);
-        await prepareImageForKitty(mediaFile);
+        if (ext === 'jpg' || ext === 'webp') {
+          await prepareImageForKitty(mediaFile);
+        }
         
         const parsed = await this.parseMessage(m);
         if (parsed) {
@@ -443,14 +485,18 @@ export class WhatsAppService {
     if (fs.existsSync(possibleJpg)) return possibleJpg;
     const possibleWebp = path.join(this.mediaDir, `${msgId}.webp`);
     if (fs.existsSync(possibleWebp)) return possibleWebp;
+    const possibleMp4 = path.join(this.mediaDir, `${msgId}.mp4`);
+    if (fs.existsSync(possibleMp4)) return possibleMp4;
 
     const rawJson = this.db.getRawMessage(msgId);
     if (!rawJson) return null;
 
     try {
       const m = JSON.parse(rawJson) as WAMessage;
-      const isSticker = Boolean(m.message?.stickerMessage);
-      const ext = isSticker ? 'webp' : 'jpg';
+      const unwrapped = unwrapMessage(m.message);
+      const isSticker = Boolean(unwrapped?.stickerMessage);
+      const isVideo = Boolean(unwrapped?.videoMessage);
+      const ext = isSticker ? 'webp' : (isVideo ? 'mp4' : 'jpg');
       const targetFile = path.join(this.mediaDir, `${msgId}.${ext}`);
 
       const buffer = await downloadMediaMessage(m, 'buffer', {}, {
@@ -460,7 +506,9 @@ export class WhatsAppService {
       const tempTarget = `${targetFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       fs.writeFileSync(tempTarget, buffer);
       fs.renameSync(tempTarget, targetFile);
-      await prepareImageForKitty(targetFile);
+      if (ext === 'jpg' || ext === 'webp') {
+        await prepareImageForKitty(targetFile);
+      }
 
       const parsed = await this.parseMessage(m);
       if (parsed) {
