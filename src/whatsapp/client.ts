@@ -420,7 +420,9 @@ export class WhatsAppService {
       reuploadRequest: (msg) => this.sock!.updateMediaMessage(msg)
     })
       .then(async (buffer) => {
-        fs.writeFileSync(mediaFile, buffer);
+        const tempFile = `${mediaFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+        fs.writeFileSync(tempFile, buffer);
+        fs.renameSync(tempFile, mediaFile);
         await prepareImageForKitty(mediaFile);
         
         const parsed = await this.parseMessage(m);
@@ -455,7 +457,9 @@ export class WhatsAppService {
         logger: this.logger,
         reuploadRequest: (msg) => this.sock!.updateMediaMessage(msg)
       });
-      fs.writeFileSync(targetFile, buffer);
+      const tempTarget = `${targetFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+      fs.writeFileSync(tempTarget, buffer);
+      fs.renameSync(tempTarget, targetFile);
       await prepareImageForKitty(targetFile);
 
       const parsed = await this.parseMessage(m);

@@ -2,6 +2,9 @@ import sharp from 'sharp';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// Disable sharp/libvips mmap file caching to prevent SIGBUS on concurrent file access
+sharp.cache(false);
+
 export interface PreparedImage {
   pngPath: string;
   pngBuffer: Buffer;
@@ -22,11 +25,19 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 34, ma
     if (fs.existsSync(pngPath)) {
       pngBuffer = fs.readFileSync(pngPath);
     } else {
-      pngBuffer = await sharp(imageSource)
+      // Read directly into memory buffer to avoid libvips mmap SIGBUS conflicts
+      const rawInputBuffer = fs.readFileSync(imageSource);
+      if (!rawInputBuffer || rawInputBuffer.length === 0) return null;
+
+      pngBuffer = await sharp(rawInputBuffer)
         .resize(maxCols * 24, maxRows * 48, { fit: 'inside' })
         .png({ quality: 95 })
         .toBuffer();
-      fs.writeFileSync(pngPath, pngBuffer);
+
+      // Atomic write via temporary file
+      const tempPath = `${pngPath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+      fs.writeFileSync(tempPath, pngBuffer);
+      fs.renameSync(tempPath, pngPath);
     }
 
     const metadata = await sharp(pngBuffer).metadata();
