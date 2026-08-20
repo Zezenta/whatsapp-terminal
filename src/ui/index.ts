@@ -579,9 +579,9 @@ export class TerminalUI {
           }
 
           if (mediaFile && fs.existsSync(mediaFile)) {
-            // Stickers occupy 75% less height and 75% less width (e.g. 8-10 cols x 3 rows vs 34 cols x 11 rows)
-            const maxCols = isSticker ? 9 : 34;
-            const maxRows = isSticker ? 3 : 11;
+            // Stickers occupy 25% less width and height (75% size of regular images: 26 cols x 8 rows)
+            const maxCols = isSticker ? 26 : 34;
+            const maxRows = isSticker ? 8 : 11;
 
             const prepared = await prepareImageForKitty(mediaFile, maxCols, maxRows);
             if (prepared) {
