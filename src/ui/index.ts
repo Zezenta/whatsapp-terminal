@@ -1,5 +1,5 @@
 import blessed from 'blessed';
-import qrcode from 'qrcode-terminal';
+import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
 import { WhatsAppService } from '../whatsapp/client.js';
@@ -154,9 +154,10 @@ export class TerminalUI {
     this.qrBox = blessed.box({
       top: 'center',
       left: 'center',
-      width: 54,
-      height: 32,
-      tags: true,
+      width: 66,
+      height: 36,
+      tags: false,
+      wrap: false,
       hidden: true,
       border: {
         type: 'line'
@@ -362,11 +363,17 @@ export class TerminalUI {
   }
 
   public showQR(qrCodeStr: string) {
-    qrcode.generate(qrCodeStr, { small: true }, (renderedQR) => {
-      this.qrBox.setContent(`{bold}{green-fg}Scan QR Code with WhatsApp{/}\n\n${renderedQR}\n{gray-fg}Open WhatsApp > Linked Devices > Link a Device{/}`);
+    try {
+      const { qr, width, height } = renderQRToUnicode(qrCodeStr);
+      const title = '  Scan QR Code with WhatsApp  \n  (Linked Devices -> Link a Device)  \n\n';
+      this.qrBox.setContent(`${title}${qr}`);
+      this.qrBox.width = width + 6;
+      this.qrBox.height = height + 6;
       this.qrBox.show();
       this.screen.render();
-    });
+    } catch {
+      // Ignored
+    }
   }
 
   public hideQR() {
