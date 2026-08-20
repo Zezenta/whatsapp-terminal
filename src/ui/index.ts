@@ -7,7 +7,7 @@ import { renderQRToUnicode } from './qr.js';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
 import { WhatsAppService } from '../whatsapp/client.js';
-import { prepareImageForKitty, createKittyPlacement, clearAllKittyImages, generateAnsiThumbnail, PreparedImage } from './media.js';
+import { prepareImageForKitty, createKittyPlacement, clearAllKittyImages, PreparedImage } from './media.js';
 
 function formatTimestamp24h(timestamp: number): string {
   if (!timestamp || timestamp <= 0) return '';
@@ -385,7 +385,6 @@ export class TerminalUI {
 
     let targetPath: string | undefined;
 
-    // 1. Check if any recent media message already has a local file on disk
     for (const m of mediaMsgs) {
       if (m.mediaPath && fs.existsSync(m.mediaPath)) {
         targetPath = m.mediaPath;
@@ -403,7 +402,6 @@ export class TerminalUI {
       }
     }
 
-    // 2. If not on disk, try downloading the most recent media message
     if (!targetPath) {
       this.header.setContent(' {bold}{yellow-fg}● Downloading media from WhatsApp...{/}');
       this.screen.render();
@@ -581,7 +579,7 @@ export class TerminalUI {
           }
 
           if (mediaFile && fs.existsSync(mediaFile)) {
-            const prepared = await prepareImageForKitty(mediaFile, 32, 12);
+            const prepared = await prepareImageForKitty(mediaFile, 38, 16);
             if (prepared) {
               newMediaList.push({
                 msgId: m.id,
@@ -589,25 +587,12 @@ export class TerminalUI {
                 lineOffset: currentLineCount
               });
 
-              // Generate ANSI thumbnail as reliable fallback inside the text grid
-              let preview = m.mediaPreview;
-              if (!preview) {
-                preview = await generateAnsiThumbnail(mediaFile, 32, 12);
-              }
-
-              if (preview) {
-                renderedLines.push(preview);
-                currentLineCount += preview.split('\n').length;
-              } else {
-                for (let r = 0; r < prepared.rows; r++) {
-                  renderedLines.push('  ');
-                  currentLineCount++;
-                }
+              // Reserve clean line space in the message viewport for the native Kitty graphic
+              for (let r = 0; r < prepared.rows; r++) {
+                renderedLines.push('  ');
+                currentLineCount++;
               }
             }
-          } else if (m.mediaPreview) {
-            renderedLines.push(m.mediaPreview);
-            currentLineCount += m.mediaPreview.split('\n').length;
           }
         }
       }
@@ -634,10 +619,10 @@ export class TerminalUI {
     const scrollOffset = this.messageBox.getScroll();
 
     for (const item of this.visibleMediaList) {
-      const screenY = boxTop + item.lineOffset - scrollOffset;
+      const screenY = boxTop + item.lineOffset - scrollOffset + 1;
       const screenBottom = screenY + item.prepared.rows;
 
-      if (screenY >= boxTop && screenBottom <= boxTop + boxHeight + 1) {
+      if (screenY >= boxTop + 1 && screenBottom <= boxTop + boxHeight + 2) {
         const cmd = createKittyPlacement(item.prepared, boxLeft, screenY);
         process.stdout.write(cmd);
       }

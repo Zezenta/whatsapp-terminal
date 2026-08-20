@@ -13,7 +13,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
-import { generateAnsiThumbnail } from '../ui/media.js';
+import { prepareImageForKitty } from '../ui/media.js';
 
 export interface WhatsAppServiceEvents {
   onQR?: (qr: string) => void;
@@ -275,7 +275,6 @@ export class WhatsAppService {
     let text = '';
     let kind = 'text';
     let mediaPath: string | undefined;
-    let mediaPreview: string | undefined;
 
     const msg = m.message;
     if (!msg) return null;
@@ -289,23 +288,14 @@ export class WhatsAppService {
     } else if (msg.imageMessage) {
       text = '[Image]' + (msg.imageMessage.caption ? ` ${msg.imageMessage.caption}` : '');
       kind = 'image';
-      if (msg.imageMessage.jpegThumbnail) {
-        mediaPreview = await generateAnsiThumbnail(Buffer.from(msg.imageMessage.jpegThumbnail), 34, 16);
-      }
       this.triggerMediaDownload(m, 'jpg');
     } else if (msg.stickerMessage) {
       text = '[Sticker]';
       kind = 'sticker';
-      if (msg.stickerMessage.pngThumbnail) {
-        mediaPreview = await generateAnsiThumbnail(Buffer.from(msg.stickerMessage.pngThumbnail), 26, 12);
-      }
       this.triggerMediaDownload(m, 'webp');
     } else if (msg.videoMessage) {
       text = '[Video]' + (msg.videoMessage.caption ? ` ${msg.videoMessage.caption}` : '');
       kind = 'video';
-      if (msg.videoMessage.jpegThumbnail) {
-        mediaPreview = await generateAnsiThumbnail(Buffer.from(msg.videoMessage.jpegThumbnail), 34, 16);
-      }
     } else if (msg.documentMessage) {
       text = `[Document] ${msg.documentMessage.fileName || 'file'}`;
       kind = 'document';
@@ -338,9 +328,6 @@ export class WhatsAppService {
     const possibleMedia = path.join(this.mediaDir, `${msgId}.${kind === 'sticker' ? 'webp' : 'jpg'}`);
     if (fs.existsSync(possibleMedia)) {
       mediaPath = possibleMedia;
-      if (!mediaPreview) {
-        mediaPreview = await generateAnsiThumbnail(possibleMedia, 34, 16);
-      }
     }
 
     let rawMsg: string | undefined;
@@ -358,7 +345,6 @@ export class WhatsAppService {
       text,
       kind,
       mediaPath,
-      mediaPreview,
       rawMsg
     };
   }
@@ -378,12 +364,11 @@ export class WhatsAppService {
     })
       .then(async (buffer) => {
         fs.writeFileSync(mediaFile, buffer);
-        const preview = await generateAnsiThumbnail(buffer, 34, 16);
+        await prepareImageForKitty(mediaFile);
         
         const parsed = await this.parseMessage(m);
         if (parsed) {
           parsed.mediaPath = mediaFile;
-          parsed.mediaPreview = preview;
           this.db.saveMessage(parsed);
           this.events.onNewMessage?.(parsed);
         }
@@ -414,12 +399,11 @@ export class WhatsAppService {
         reuploadRequest: (msg) => this.sock!.updateMediaMessage(msg)
       });
       fs.writeFileSync(targetFile, buffer);
+      await prepareImageForKitty(targetFile);
 
-      const preview = await generateAnsiThumbnail(buffer, 34, 16);
       const parsed = await this.parseMessage(m);
       if (parsed) {
         parsed.mediaPath = targetFile;
-        parsed.mediaPreview = preview;
         this.db.saveMessage(parsed);
         this.events.onNewMessage?.(parsed);
       }
