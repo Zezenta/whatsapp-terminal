@@ -49,7 +49,10 @@ export class LocalDatabase {
         kind TEXT,
         media_path TEXT,
         media_preview TEXT,
-        raw_msg TEXT
+        raw_msg TEXT,
+        reaction TEXT,
+        quoted_text TEXT,
+        quoted_sender TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, timestamp);
@@ -66,6 +69,15 @@ export class LocalDatabase {
     try {
       this.db.exec('ALTER TABLE messages ADD COLUMN raw_msg TEXT;');
     } catch {}
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN reaction TEXT;');
+    } catch {}
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN quoted_text TEXT;');
+    } catch {}
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN quoted_sender TEXT;');
+    } catch {}
   }
 
   public linkExistingMediaFiles() {
@@ -75,9 +87,11 @@ export class LocalDatabase {
       const files = fs.readdirSync(mediaDir);
       const stmt = this.db.prepare('UPDATE messages SET media_path = ? WHERE id = ? AND (media_path IS NULL OR media_path = \'\')');
       for (const file of files) {
-        const id = path.parse(file).name;
-        const fullPath = path.join(mediaDir, file);
-        stmt.run(fullPath, id);
+        if (file.endsWith('.jpg') || file.endsWith('.webp')) {
+          const id = path.parse(file).name;
+          const fullPath = path.join(mediaDir, file);
+          stmt.run(fullPath, id);
+        }
       }
     } catch {}
   }
@@ -279,12 +293,15 @@ export class LocalDatabase {
     }
 
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview, raw_msg)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview, raw_msg, reaction, quoted_text, quoted_sender)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         media_path = CASE WHEN excluded.media_path IS NOT NULL AND excluded.media_path != '' THEN excluded.media_path ELSE messages.media_path END,
         media_preview = CASE WHEN excluded.media_preview IS NOT NULL AND excluded.media_preview != '' THEN excluded.media_preview ELSE messages.media_preview END,
-        raw_msg = CASE WHEN excluded.raw_msg IS NOT NULL AND excluded.raw_msg != '' THEN excluded.raw_msg ELSE messages.raw_msg END
+        raw_msg = CASE WHEN excluded.raw_msg IS NOT NULL AND excluded.raw_msg != '' THEN excluded.raw_msg ELSE messages.raw_msg END,
+        reaction = CASE WHEN excluded.reaction IS NOT NULL THEN excluded.reaction ELSE messages.reaction END,
+        quoted_text = CASE WHEN excluded.quoted_text IS NOT NULL THEN excluded.quoted_text ELSE messages.quoted_text END,
+        quoted_sender = CASE WHEN excluded.quoted_sender IS NOT NULL THEN excluded.quoted_sender ELSE messages.quoted_sender END
     `);
     stmt.run(
       msg.id,
@@ -297,12 +314,19 @@ export class LocalDatabase {
       msg.kind,
       msg.mediaPath || null,
       msg.mediaPreview || null,
-      msg.rawMsg || null
+      msg.rawMsg || null,
+      msg.reaction || null,
+      msg.quotedText || null,
+      msg.quotedSender || null
     );
 
     this.db.prepare(`
       UPDATE chats SET last_message_time = MAX(COALESCE(last_message_time, 0), ?) WHERE id = ?
     `).run(msg.timestamp, canonicalChatId);
+  }
+
+  public updateMessageReaction(msgId: string, reaction: string) {
+    this.db.prepare('UPDATE messages SET reaction = ? WHERE id = ?').run(reaction || null, msgId);
   }
 
   public getRawMessage(id: string): string | null {
@@ -329,6 +353,9 @@ export class LocalDatabase {
       media_path?: string;
       media_preview?: string;
       raw_msg?: string;
+      reaction?: string;
+      quoted_text?: string;
+      quoted_sender?: string;
     }>;
 
     return rows.map(r => {
@@ -348,7 +375,10 @@ export class LocalDatabase {
         kind: r.kind,
         mediaPath: r.media_path || undefined,
         mediaPreview: r.media_preview || undefined,
-        rawMsg: r.raw_msg || undefined
+        rawMsg: r.raw_msg || undefined,
+        reaction: r.reaction || undefined,
+        quotedText: r.quoted_text || undefined,
+        quotedSender: r.quoted_sender || undefined
       };
     });
   }
@@ -370,6 +400,9 @@ export class LocalDatabase {
       media_path?: string;
       media_preview?: string;
       raw_msg?: string;
+      reaction?: string;
+      quoted_text?: string;
+      quoted_sender?: string;
     } | undefined;
 
     if (!row) return null;
@@ -384,7 +417,10 @@ export class LocalDatabase {
       kind: row.kind,
       mediaPath: row.media_path || undefined,
       mediaPreview: row.media_preview || undefined,
-      rawMsg: row.raw_msg || undefined
+      rawMsg: row.raw_msg || undefined,
+      reaction: row.reaction || undefined,
+      quotedText: row.quoted_text || undefined,
+      quotedSender: row.quoted_sender || undefined
     };
   }
 

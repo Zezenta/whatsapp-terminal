@@ -31,6 +31,15 @@ interface VisibleMedia {
   prepared: PreparedImage;
 }
 
+const REACTION_MAP: Record<string, string> = {
+  '1': '👍',
+  '2': '❤️',
+  '3': '😂',
+  '4': '😮',
+  '5': '😢',
+  '6': '🙏'
+};
+
 export class TerminalUI {
   private screen: blessed.Widgets.Screen;
   private header: blessed.Widgets.BoxElement;
@@ -49,6 +58,10 @@ export class TerminalUI {
   private isLoadingOlder = false;
   private visibleMediaList: VisibleMedia[] = [];
   private lastRenderedKittyState = '';
+
+  private currentMessages: Message[] = [];
+  private selectedMessageIndex = -1;
+  private replyingTo: Message | null = null;
 
   constructor(database: LocalDatabase, whatsapp: WhatsAppService) {
     patchBlessedUnicode();
@@ -74,7 +87,7 @@ export class TerminalUI {
       width: '100%',
       height: 1,
       tags: true,
-      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [o] Fullscreen Image | [i/Enter] Type | [q] Quit{/}',
+      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [1-6] React | [o] Image | [q] Quit{/}',
       style: {
         bg: 'black',
         fg: 'white',
@@ -248,7 +261,7 @@ export class TerminalUI {
         (this.chatList as any).up(1);
         this.onChatSelectionChanged();
       } else if (this.activePanel === 'messages') {
-        this.handleMessageScrollUp(2);
+        this.selectPreviousMessage();
       }
     });
 
@@ -257,8 +270,7 @@ export class TerminalUI {
         (this.chatList as any).down(1);
         this.onChatSelectionChanged();
       } else if (this.activePanel === 'messages') {
-        this.messageBox.scroll(2);
-        this.screen.render();
+        this.selectNextMessage();
       }
     });
 
@@ -288,14 +300,50 @@ export class TerminalUI {
       }
     });
 
+    // 1-6 reaction shortcuts on selected message
+    for (const key of ['1', '2', '3', '4', '5', '6']) {
+      this.screen.key([key], async () => {
+        if (this.activePanel === 'messages' && this.selectedChat && this.selectedMessageIndex >= 0) {
+          const msg = this.currentMessages[this.selectedMessageIndex];
+          if (msg) {
+            const emoji = REACTION_MAP[key];
+            const ok = await this.waService.sendReaction(this.selectedChat.id, msg, emoji);
+            if (ok) {
+              msg.reaction = emoji;
+              this.updateHeader();
+              await this.loadMessagesForSelectedChat(true);
+            }
+          }
+        }
+      });
+    }
+
     this.screen.key(['o', 'v'], async () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
         await this.openLatestMedia();
       }
     });
 
-    this.screen.key(['i', 'enter'], () => {
+    this.screen.key(['enter', 'r'], () => {
+      if (this.activePanel === 'messages' && this.selectedChat) {
+        if (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length) {
+          this.replyingTo = this.currentMessages[this.selectedMessageIndex];
+        } else {
+          this.replyingTo = null;
+        }
+        this.setFocus('input');
+        this.inputBox.setValue('');
+        this.inputBox.readInput();
+      } else if (this.activePanel === 'chats' && this.selectedChat) {
+        this.setFocus('input');
+        this.inputBox.setValue('');
+        this.inputBox.readInput();
+      }
+    });
+
+    this.screen.key(['i'], () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
+        this.replyingTo = null;
         this.setFocus('input');
         this.inputBox.setValue('');
         this.inputBox.readInput();
@@ -314,20 +362,72 @@ export class TerminalUI {
       const trimmed = text.trim();
       if (trimmed && this.selectedChat) {
         try {
-          await this.waService.sendMessage(this.selectedChat.id, trimmed);
+          if (this.replyingTo) {
+            await this.waService.sendReplyMessage(this.selectedChat.id, trimmed, this.replyingTo);
+          } else {
+            await this.waService.sendMessage(this.selectedChat.id, trimmed);
+          }
+          this.replyingTo = null;
           await this.loadMessagesForSelectedChat(false);
         } catch (err: any) {
           this.updateStatus('error', err?.message || 'Send failed');
         }
       }
+      this.replyingTo = null;
       this.inputBox.setValue('');
-      this.setFocus('chats');
+      this.setFocus('messages');
     });
 
     this.inputBox.on('cancel', () => {
+      this.replyingTo = null;
       this.inputBox.setValue('');
-      this.setFocus('chats');
+      this.setFocus('messages');
     });
+  }
+
+  private async selectPreviousMessage() {
+    if (this.currentMessages.length === 0) return;
+
+    if (this.selectedMessageIndex <= 0) {
+      this.selectedMessageIndex = 0;
+      await this.loadMoreOlderMessages();
+    } else {
+      this.selectedMessageIndex--;
+      await this.loadMessagesForSelectedChat(true);
+    }
+    this.scrollToSelectedMessage();
+  }
+
+  private async selectNextMessage() {
+    if (this.currentMessages.length === 0) return;
+
+    if (this.selectedMessageIndex < this.currentMessages.length - 1) {
+      this.selectedMessageIndex++;
+      await this.loadMessagesForSelectedChat(true);
+    }
+    this.scrollToSelectedMessage();
+  }
+
+  private scrollToSelectedMessage() {
+    if (this.selectedMessageIndex < 0 || this.selectedMessageIndex >= this.currentMessages.length) return;
+    const msg = this.currentMessages[this.selectedMessageIndex];
+    if (!msg) return;
+
+    const clines = (this.messageBox as any)._clines || [];
+    const tag = `__MSG_${msg.id}__`;
+    const lineIdx = clines.findIndex((l: string) => l.includes(tag));
+    if (lineIdx === -1) return;
+
+    const childBase = (this.messageBox as any).childBase || 0;
+    const visibleHeight = (this.messageBox as any).height - 2;
+
+    if (lineIdx < childBase) {
+      this.messageBox.scrollTo(lineIdx);
+      this.screen.render();
+    } else if (lineIdx >= childBase + visibleHeight - 2) {
+      this.messageBox.scrollTo(lineIdx - visibleHeight + 3);
+      this.screen.render();
+    }
   }
 
   private async handleMessageScrollUp(lines: number) {
@@ -476,6 +576,25 @@ export class TerminalUI {
       this.inputBox.focus();
     }
 
+    this.updateHeader();
+    this.screen.render();
+  }
+
+  private updateHeader() {
+    if (this.activePanel === 'input') {
+      if (this.replyingTo) {
+        const snippet = this.replyingTo.text.replace(/\n/g, ' ').slice(0, 35);
+        this.header.setContent(` {bold}{cyan-fg}● Replying to ${this.replyingTo.senderName}:{/} "${snippet}..." | {gray-fg}[Enter] Send | [Esc] Cancel{/}`);
+      } else {
+        this.header.setContent(' {bold}{green-fg}● Type Message{/} | {gray-fg}[Enter] Send | [Esc] Cancel{/}');
+      }
+    } else if (this.activePanel === 'messages') {
+      const selectedMsg = this.selectedMessageIndex >= 0 ? this.currentMessages[this.selectedMessageIndex] : null;
+      const reactionInfo = selectedMsg ? ' | [1]👍 [2]❤️ [3]😂 [4]😮 [5]😢 [6]🙏' : '';
+      this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply${reactionInfo}{/} | {gray-fg}[Tab] Chats | [o] Image | [q] Quit{/}`);
+    } else {
+      this.header.setContent(' {bold}{green-fg}● WhatsApp Terminal{/} | {gray-fg}[Tab] Messages | [↑/↓] Select Chat | [i/Enter] Type | [q] Quit{/}');
+    }
     this.screen.render();
   }
 
@@ -531,6 +650,8 @@ export class TerminalUI {
         this.chatHeader.setContent(' {bold}Select a chat from the left panel{/}');
         this.messageBox.setContent('No conversation selected');
         this.visibleMediaList = [];
+        this.currentMessages = [];
+        this.selectedMessageIndex = -1;
         this.lastRenderedKittyState = '';
         process.stdout.write(clearAllKittyImages());
         this.screen.render();
@@ -544,6 +665,13 @@ export class TerminalUI {
 
       const limit = this.chatMessageLimits.get(this.selectedChat.id) || 50;
       const msgs = this.db.getMessages(this.selectedChat.id, limit);
+      this.currentMessages = msgs;
+
+      if (this.selectedMessageIndex === -1 || !preserveScroll) {
+        this.selectedMessageIndex = Math.max(0, msgs.length - 1);
+      } else if (this.selectedMessageIndex >= msgs.length) {
+        this.selectedMessageIndex = msgs.length - 1;
+      }
 
       if (msgs.length === 0) {
         this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
@@ -553,7 +681,10 @@ export class TerminalUI {
         const renderedLines: string[] = [];
         const newMediaList: VisibleMedia[] = [];
 
-        for (const m of msgs) {
+        for (let i = 0; i < msgs.length; i++) {
+          const m = msgs[i];
+          const isSelected = this.activePanel === 'messages' && i === this.selectedMessageIndex;
+
           const timeStr = formatTimestamp24h(m.timestamp);
           const senderColor = m.fromMe ? 'cyan-fg' : 'green-fg';
           const senderName = m.fromMe ? 'Me' : m.senderName;
@@ -561,8 +692,24 @@ export class TerminalUI {
           const sanitizedText = sanitizeTextForTui(m.text);
           const escapedSender = blessed.escape(sanitizedSender);
           const escapedText = blessed.escape(sanitizedText);
+          const reactionBadge = m.reaction ? ` {yellow-fg}[${m.reaction}]{/}` : '';
 
-          let out = `{gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}`;
+          // Add invisible message anchor tag for precise scrolling
+          renderedLines.push(`{black-fg}__MSG_${m.id}__{/}`);
+
+          // If message is a reply to another message, show quoted preview block
+          if (m.quotedText) {
+            const qSender = m.quotedSender ? `@${sanitizeTextForTui(m.quotedSender)}: ` : '';
+            const qText = sanitizeTextForTui(m.quotedText).replace(/\n/g, ' ').slice(0, 45);
+            renderedLines.push(`  {gray-fg}┌─ ${blescape(qSender)}${blescape(qText)}{/}`);
+          }
+
+          let out: string;
+          if (isSelected) {
+            out = `{white-bg}{black-fg} ► (${timeStr}) ${escapedSender}: ${escapedText}${reactionBadge} {/}`;
+          } else {
+            out = `  {gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}${reactionBadge}`;
+          }
           renderedLines.push(out);
 
           const isSticker = m.kind === 'sticker';
@@ -618,6 +765,7 @@ export class TerminalUI {
         }
       }
 
+      this.updateHeader();
       this.screen.render();
     } catch {
       // Ignored
@@ -708,7 +856,7 @@ export class TerminalUI {
     if (status === 'connected') {
       this.hideQR();
       const user = detail ? ` | ${detail.split('@')[0]}` : '';
-      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [o] Fullscreen Image | [i/Enter] Type | [q] Quit{/}`);
+      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [1-6] React | [q] Quit{/}`);
     } else if (status === 'qr') {
       this.header.setContent(' {bold}{yellow-fg}● Scan QR Code{/} | {gray-fg}Waiting for phone scan...{/}');
     } else if (status === 'connecting') {
@@ -721,7 +869,7 @@ export class TerminalUI {
   }
 
   public updateSyncProgress(info: string) {
-    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [o] Fullscreen Image | [i/Enter] Type | [q] Quit{/}`);
+    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [q] Quit{/}`);
     this.screen.render();
   }
 
@@ -730,4 +878,8 @@ export class TerminalUI {
       this.loadMessagesForSelectedChat(true);
     }
   }
+}
+
+function blescape(str: string): string {
+  return blessed.escape(str || '');
 }

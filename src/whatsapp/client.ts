@@ -68,7 +68,6 @@ export class WhatsAppService {
     if (this.isConnecting) return;
     this.isConnecting = true;
 
-    // Force snapshot if we have no saved contact names
     if (this.db.getNamedContactsCount() < 10 && fs.existsSync(this.authDir)) {
       try {
         const files = fs.readdirSync(this.authDir);
@@ -233,6 +232,16 @@ export class WhatsAppService {
     this.sock.ev.on('messages.upsert', async ({ messages: rawMessages }) => {
       for (const m of rawMessages) {
         if (!m.message) continue;
+
+        if (m.message.reactionMessage) {
+          const targetKey = m.message.reactionMessage.key;
+          const emoji = m.message.reactionMessage.text || '';
+          if (targetKey?.id) {
+            this.db.updateMessageReaction(targetKey.id, emoji);
+          }
+          continue;
+        }
+
         const parsed = await this.parseMessage(m);
         if (parsed) {
           this.db.saveMessage(parsed);
@@ -275,11 +284,26 @@ export class WhatsAppService {
     let text = '';
     let kind = 'text';
     let mediaPath: string | undefined;
+    let quotedText: string | undefined;
+    let quotedSender: string | undefined;
 
     const msg = m.message;
     if (!msg) return null;
 
     const msgId = m.key.id || Math.random().toString(36);
+
+    const contextInfo = msg.extendedTextMessage?.contextInfo ||
+      msg.imageMessage?.contextInfo ||
+      msg.videoMessage?.contextInfo ||
+      msg.stickerMessage?.contextInfo ||
+      msg.documentMessage?.contextInfo;
+
+    if (contextInfo?.quotedMessage) {
+      const q = contextInfo.quotedMessage;
+      quotedText = q.conversation || q.extendedTextMessage?.text || (q.imageMessage ? '[Image]' : '') || (q.stickerMessage ? '[Sticker]' : '') || '[Quoted Message]';
+      const qSender = contextInfo.participant || '';
+      quotedSender = qSender ? (this.db.resolveContactName(qSender) || qSender.split('@')[0]) : undefined;
+    }
 
     if (msg.conversation) {
       text = msg.conversation;
@@ -345,7 +369,9 @@ export class WhatsAppService {
       text,
       kind,
       mediaPath,
-      rawMsg
+      rawMsg,
+      quotedText,
+      quotedSender
     };
   }
 
@@ -412,6 +438,89 @@ export class WhatsAppService {
     } catch {
       return null;
     }
+  }
+
+  public async sendReaction(chatId: string, msg: Message, emoji: string): Promise<boolean> {
+    if (!this.sock) return false;
+
+    let targetKey: any;
+    if (msg.rawMsg) {
+      try {
+        const raw = JSON.parse(msg.rawMsg);
+        targetKey = raw.key;
+      } catch {}
+    }
+
+    if (!targetKey) {
+      targetKey = {
+        remoteJid: msg.chatId,
+        fromMe: msg.fromMe,
+        id: msg.id,
+        participant: msg.senderId !== msg.chatId ? msg.senderId : undefined
+      };
+    }
+
+    try {
+      await this.sock.sendMessage(chatId, {
+        react: {
+          text: emoji,
+          key: targetKey
+        }
+      });
+      this.db.updateMessageReaction(msg.id, emoji);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public async sendReplyMessage(chatId: string, text: string, quotedMsg: Message): Promise<Message | null> {
+    if (!this.sock) throw new Error('Not connected');
+
+    let quoted: any;
+    if (quotedMsg.rawMsg) {
+      try {
+        quoted = JSON.parse(quotedMsg.rawMsg);
+      } catch {}
+    }
+
+    if (!quoted) {
+      quoted = {
+        key: {
+          remoteJid: quotedMsg.chatId,
+          fromMe: quotedMsg.fromMe,
+          id: quotedMsg.id,
+          participant: quotedMsg.senderId !== quotedMsg.chatId ? quotedMsg.senderId : undefined
+        },
+        message: {
+          conversation: quotedMsg.text
+        }
+      };
+    }
+
+    const sent = await this.sock.sendMessage(chatId, { text }, { quoted });
+    if (!sent) return null;
+
+    const selfId = this.sock.user?.id?.split(':')[0] + '@s.whatsapp.net' || 'me';
+    const timestamp = toNumber(sent.messageTimestamp) || Math.floor(Date.now() / 1000);
+
+    const msg: Message = {
+      id: sent.key.id || Math.random().toString(36),
+      chatId,
+      senderId: selfId,
+      senderName: 'Me',
+      timestamp,
+      fromMe: true,
+      text,
+      kind: 'text',
+      quotedText: quotedMsg.text,
+      quotedSender: quotedMsg.senderName
+    };
+
+    this.db.saveMessage(msg);
+    this.events.onNewMessage?.(msg);
+    this.events.onChatsUpdated?.(this.db.getChats());
+    return msg;
   }
 
   public async resyncRecentChatHistory(chatId: string, count = 50): Promise<void> {
