@@ -71,7 +71,7 @@ export class WhatsAppService {
 
     this.sock.ev.on('creds.update', saveCreds);
 
-    this.sock.ev.on('connection.update', (update) => {
+    this.sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -83,8 +83,18 @@ export class WhatsAppService {
         this.isConnecting = false;
         const userJid = this.sock?.user?.id || '';
         this.events.onStatusChange?.('connected', userJid);
+        
+        // 1. Fetch group subjects
         this.loadGroupsAndChats();
 
+        // 2. Resync AppState to download phone book contact names
+        try {
+          await (this.sock as any)?.resyncAppState?.(['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'], true);
+        } catch {
+          // Ignored
+        }
+
+        // 3. Start bulk history sync
         setTimeout(() => {
           this.startBulkHistorySync();
         }, 3000);
@@ -124,18 +134,18 @@ export class WhatsAppService {
         }
       }
 
-      // 2. Process Contacts
+      // 2. Process Contacts (saved phone book names)
       if (contacts) {
         for (const c of contacts) {
           if (!c.id || c.id.endsWith('@newsletter')) continue;
-          const name = c.name || c.notify || c.verifiedName || '';
-          this.db.saveContact({
-            id: c.id,
-            name: c.name || '',
-            notify: c.notify || c.verifiedName || '',
-            phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
-            lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
-          });
+          if (c.name) {
+            this.db.saveContact({
+              id: c.id,
+              name: c.name,
+              phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
+              lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
+            });
+          }
         }
       }
 
@@ -196,16 +206,18 @@ export class WhatsAppService {
       this.events.onChatsUpdated?.(this.db.getChats());
     });
 
+    // Contacts received from phone address book sync
     this.sock.ev.on('contacts.upsert', (contacts) => {
       for (const c of contacts) {
         if (!c.id || c.id.endsWith('@newsletter')) continue;
-        this.db.saveContact({
-          id: c.id,
-          name: c.name || '',
-          notify: c.notify || c.verifiedName || '',
-          phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
-          lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
-        });
+        if (c.name) {
+          this.db.saveContact({
+            id: c.id,
+            name: c.name,
+            phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
+            lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
+          });
+        }
       }
       this.events.onChatsUpdated?.(this.db.getChats());
     });
@@ -213,13 +225,14 @@ export class WhatsAppService {
     this.sock.ev.on('contacts.update', (updates) => {
       for (const c of updates) {
         if (!c.id) continue;
-        this.db.saveContact({
-          id: c.id,
-          name: c.name || '',
-          notify: c.notify || (c as any).verifiedName || '',
-          phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
-          lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
-        });
+        if (c.name) {
+          this.db.saveContact({
+            id: c.id,
+            name: c.name,
+            phone: c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '',
+            lid: (c as any).lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '')
+          });
+        }
       }
       this.events.onChatsUpdated?.(this.db.getChats());
     });
@@ -236,21 +249,7 @@ export class WhatsAppService {
     const senderId = fromMe ? selfId : (m.key.participant || chatId);
     const timestamp = toNumber(m.messageTimestamp) || Math.floor(Date.now() / 1000);
 
-    // Save push name into contacts table
-    if (!fromMe && m.pushName && m.pushName !== 'Me') {
-      this.db.saveContact({
-        id: senderId,
-        notify: m.pushName
-      });
-      if (chatId.endsWith('@lid') || chatId.endsWith('@s.whatsapp.net')) {
-        this.db.saveContact({
-          id: chatId,
-          notify: m.pushName
-        });
-      }
-    }
-
-    const senderName = fromMe ? 'Me' : (m.pushName || this.db.resolveContactName(senderId) || senderId.split('@')[0]);
+    const senderName = fromMe ? 'Me' : (this.db.resolveContactName(senderId) || senderId.split('@')[0]);
 
     let text = '';
     let kind = 'text';
@@ -289,11 +288,7 @@ export class WhatsAppService {
     if (isGroup) {
       this.fetchMissingGroupMetadata(chatId);
     } else {
-      if (!fromMe) {
-        chatName = m.pushName || this.db.resolveContactName(chatId) || '';
-      } else {
-        chatName = this.db.resolveContactName(chatId) || '';
-      }
+      chatName = this.db.resolveContactName(chatId);
     }
 
     this.db.saveChat({

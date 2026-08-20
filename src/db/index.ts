@@ -17,7 +17,7 @@ export class LocalDatabase {
     this.db.pragma('foreign_keys = ON');
 
     this.initSchema();
-    this.cleanBadNames();
+    this.cleanNonContactNames();
   }
 
   private initSchema() {
@@ -25,7 +25,6 @@ export class LocalDatabase {
       CREATE TABLE IF NOT EXISTS contacts (
         id TEXT PRIMARY KEY,
         name TEXT,
-        notify TEXT,
         phone TEXT,
         lid TEXT
       );
@@ -55,98 +54,84 @@ export class LocalDatabase {
     `);
   }
 
-  private cleanBadNames() {
-    // Reset names that were saved as 'Me' or numeric raw IDs
+  public cleanNonContactNames() {
+    // Clear chat names that are not groups and don't match an address book contact
     this.db.prepare(`
       UPDATE chats 
       SET name = '' 
-      WHERE name = 'Me' 
-         OR name GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*'
-         OR name LIKE '%@%'
+      WHERE is_group = 0 
+        AND id NOT IN (SELECT id FROM contacts WHERE name != '')
     `).run();
   }
 
-  public saveContact(c: { id: string; name?: string; notify?: string; phone?: string; lid?: string }) {
+  public saveContact(c: { id: string; name?: string; phone?: string; lid?: string }) {
     if (!c.id) return;
     const existing = this.db.prepare('SELECT * FROM contacts WHERE id = ?').get(c.id) as any;
     
-    const name = c.name || existing?.name || '';
-    const notify = c.notify || existing?.notify || '';
+    // Only accept genuine address book names (not empty, not JIDs, not raw numbers)
+    let validName = c.name?.trim() || existing?.name || '';
+    if (validName === c.id || validName.includes('@') || (/^\d+$/.test(validName) && validName.length > 8) || validName === 'Me') {
+      validName = existing?.name || '';
+    }
+
     const phone = c.phone || existing?.phone || (c.id.endsWith('@s.whatsapp.net') ? c.id.split('@')[0] : '');
     const lid = c.lid || existing?.lid || (c.id.endsWith('@lid') ? c.id.split('@')[0] : '');
 
     this.db.prepare(`
-      INSERT INTO contacts (id, name, notify, phone, lid)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO contacts (id, name, phone, lid)
+      VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = CASE WHEN excluded.name != '' THEN excluded.name ELSE contacts.name END,
-        notify = CASE WHEN excluded.notify != '' THEN excluded.notify ELSE contacts.notify END,
         phone = CASE WHEN excluded.phone != '' THEN excluded.phone ELSE contacts.phone END,
         lid = CASE WHEN excluded.lid != '' THEN excluded.lid ELSE contacts.lid END
-    `).run(c.id, name, notify, phone, lid);
+    `).run(c.id, validName, phone, lid);
 
-    const resolvedName = name || notify;
-    if (resolvedName) {
+    if (validName) {
       this.db.prepare(`
         UPDATE chats 
         SET name = ? 
-        WHERE (id = ? OR id = ? OR id = ?) 
-          AND (name = '' OR name = id OR name = 'Me' OR name LIKE '%@%' OR name GLOB '[0-9]*')
-      `).run(resolvedName, c.id, phone ? `${phone}@s.whatsapp.net` : '', lid ? `${lid}@lid` : '');
+        WHERE (id = ? OR id = ? OR id = ?) AND is_group = 0
+      `).run(validName, c.id, phone ? `${phone}@s.whatsapp.net` : '', lid ? `${lid}@lid` : '');
     }
   }
 
-  public resolveContactName(id: string): string | null {
-    if (!id) return null;
+  public resolveContactName(id: string): string {
+    if (!id) return '';
 
-    // 1. Direct lookup in contacts table
-    const direct = this.db.prepare('SELECT name, notify FROM contacts WHERE id = ?').get(id) as { name?: string, notify?: string } | undefined;
-    if (direct?.name && direct.name.trim() !== '') return direct.name;
-    if (direct?.notify && direct.notify.trim() !== '') return direct.notify;
+    // 1. Check direct ID in contacts for saved phone book name
+    const direct = this.db.prepare('SELECT name, phone FROM contacts WHERE id = ?').get(id) as { name?: string; phone?: string } | undefined;
+    if (direct?.name && direct.name.trim() !== '') return direct.name.trim();
 
     // 2. If ID is LID (e.g. 12345@lid)
     if (id.endsWith('@lid')) {
       const lidUser = id.split('@')[0];
-      const byLid = this.db.prepare('SELECT name, notify, phone FROM contacts WHERE lid = ? OR id = ?').get(lidUser, id) as any;
-      if (byLid?.name && byLid.name.trim() !== '') return byLid.name;
-      if (byLid?.notify && byLid.notify.trim() !== '') return byLid.notify;
-      if (byLid?.phone) return `+${byLid.phone}`;
+      const byLid = this.db.prepare('SELECT name, phone FROM contacts WHERE lid = ? OR id = ?').get(lidUser, id) as any;
+      if (byLid?.name && byLid.name.trim() !== '') return byLid.name.trim();
+      if (byLid?.phone && byLid.phone.trim() !== '') return `+${byLid.phone.trim()}`;
+      return `+${lidUser}`;
     }
 
     // 3. If ID is Phone Number JID (e.g. 5939...@s.whatsapp.net)
     if (id.endsWith('@s.whatsapp.net')) {
       const pnUser = id.split('@')[0];
-      const byPhone = this.db.prepare('SELECT name, notify FROM contacts WHERE phone = ? OR id = ?').get(pnUser, id) as any;
-      if (byPhone?.name && byPhone.name.trim() !== '') return byPhone.name;
-      if (byPhone?.notify && byPhone.notify.trim() !== '') return byPhone.notify;
+      const byPhone = this.db.prepare('SELECT name FROM contacts WHERE phone = ? OR id = ?').get(pnUser, id) as any;
+      if (byPhone?.name && byPhone.name.trim() !== '') return byPhone.name.trim();
+      return `+${pnUser}`;
     }
 
-    // 4. Check if we received messages from this sender with a valid pushName
-    const msg = this.db.prepare(`
-      SELECT sender_name FROM messages 
-      WHERE (chat_id = ? OR sender_id = ?) 
-        AND from_me = 0 
-        AND sender_name != '' 
-        AND sender_name != 'Me' 
-        AND sender_name NOT LIKE '%@%' 
-        AND NOT (sender_name GLOB '[0-9]*' AND length(sender_name) > 8)
-      ORDER BY timestamp DESC LIMIT 1
-    `).get(id, id) as { sender_name: string } | undefined;
-
-    if (msg?.sender_name && msg.sender_name.trim() !== '') {
-      return msg.sender_name;
-    }
-
-    return null;
+    return id.split('@')[0];
   }
 
   public saveChat(chat: Chat) {
     const existing = this.db.prepare('SELECT name, last_message_time FROM chats WHERE id = ?').get(chat.id) as { name: string, last_message_time: number } | undefined;
     
-    // Ignore invalid/id-like names
-    let cleanName = chat.name;
-    if (!cleanName || cleanName === 'Me' || cleanName === chat.id || cleanName.includes('@') || (/^\d+$/.test(cleanName) && cleanName.length > 8)) {
-      cleanName = existing?.name || '';
+    let cleanName = chat.name?.trim() || '';
+    if (chat.isGroup) {
+      if (!cleanName || cleanName === chat.id || cleanName.includes('@') || (/^\d+$/.test(cleanName) && cleanName.length > 8)) {
+        cleanName = existing?.name || '';
+      }
+    } else {
+      cleanName = this.resolveContactName(chat.id);
     }
 
     const lastTime = Math.max(chat.lastMessageTime || 0, existing?.last_message_time || 0);
@@ -187,26 +172,17 @@ export class LocalDatabase {
 
     return rows.map(r => {
       let displayName = r.name;
-      
-      const isIdLike = !displayName || 
-        displayName === 'Me' || 
-        displayName === r.id || 
-        displayName.includes('@') || 
-        (/^\d+$/.test(displayName) && displayName.length > 8);
-
-      if (isIdLike) {
-        const resolved = this.resolveContactName(r.id);
-        if (resolved) {
-          displayName = resolved;
-        } else if (!r.is_group && r.id.endsWith('@s.whatsapp.net')) {
-          const num = r.id.split('@')[0];
-          displayName = `+${num}`;
+      if (r.is_group) {
+        if (!displayName || displayName === r.id || displayName.includes('@') || (/^\d+$/.test(displayName) && displayName.length > 8)) {
+          displayName = `[Group] ${r.id.split('@')[0]}`;
         }
+      } else {
+        displayName = this.resolveContactName(r.id);
       }
 
       return {
         id: r.id,
-        name: displayName || r.id.split('@')[0],
+        name: displayName,
         isGroup: Boolean(r.is_group),
         unread: r.unread,
         lastMessageTime: r.last_message_time || 0
@@ -215,11 +191,10 @@ export class LocalDatabase {
   }
 
   public saveMessage(msg: Message) {
-    // Ensure chat exists
     const chatExists = this.db.prepare('SELECT id FROM chats WHERE id = ?').get(msg.chatId);
     if (!chatExists) {
       const isGroup = msg.chatId.endsWith('@g.us');
-      const resolvedName = this.resolveContactName(msg.chatId) || '';
+      const resolvedName = isGroup ? '' : this.resolveContactName(msg.chatId);
       this.saveChat({
         id: msg.chatId,
         name: resolvedName,
@@ -244,7 +219,6 @@ export class LocalDatabase {
       msg.kind
     );
 
-    // Update chat last message time
     this.db.prepare(`
       UPDATE chats SET last_message_time = MAX(COALESCE(last_message_time, 0), ?) WHERE id = ?
     `).run(msg.timestamp, msg.chatId);
@@ -267,13 +241,9 @@ export class LocalDatabase {
     }>;
 
     return rows.map(r => {
-      let senderName = r.sender_name;
+      let senderName = 'Me';
       if (!r.from_me) {
-        if (!senderName || senderName === 'Me' || senderName.includes('@') || (/^\d+$/.test(senderName) && senderName.length > 8)) {
-          senderName = this.resolveContactName(r.sender_id) || (r.sender_id.endsWith('@s.whatsapp.net') ? `+${r.sender_id.split('@')[0]}` : r.sender_id.split('@')[0]);
-        }
-      } else {
-        senderName = 'Me';
+        senderName = this.resolveContactName(r.sender_id) || r.sender_name || r.sender_id.split('@')[0];
       }
 
       return {
