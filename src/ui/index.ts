@@ -282,29 +282,47 @@ export class TerminalUI {
       }
     });
 
-    this.screen.key(['pageup'], () => {
+    this.screen.key(['pageup'], async () => {
       if (this.activePanel === 'messages') {
-        this.handleMessageScrollUp(10);
+        if (this.currentMessages.length > 0) {
+          const step = 8;
+          if (this.selectedMessageIndex <= step) {
+            this.selectedMessageIndex = 0;
+            await this.loadMoreOlderMessages();
+          } else {
+            this.selectedMessageIndex -= step;
+            await this.loadMessagesForSelectedChat(true);
+          }
+          this.scrollToSelectedMessage();
+        } else {
+          await this.handleMessageScrollUp(25);
+        }
       }
     });
 
-    this.screen.key(['pagedown'], () => {
+    this.screen.key(['pagedown'], async () => {
       if (this.activePanel === 'messages') {
-        this.messageBox.scroll(10);
-        this.screen.render();
+        if (this.currentMessages.length > 0) {
+          const step = 8;
+          this.selectedMessageIndex = Math.min(this.currentMessages.length - 1, this.selectedMessageIndex + step);
+          await this.loadMessagesForSelectedChat(true);
+          this.scrollToSelectedMessage();
+        } else {
+          this.messageBox.scroll(25);
+          this.screen.render();
+        }
       }
     });
 
     this.messageBox.on('wheelup', () => {
       if (this.activePanel === 'messages') {
-        this.handleMessageScrollUp(3);
+        this.selectPreviousMessage();
       }
     });
 
     this.messageBox.on('wheeldown', () => {
       if (this.activePanel === 'messages') {
-        this.messageBox.scroll(3);
-        this.screen.render();
+        this.selectNextMessage();
       }
     });
 
