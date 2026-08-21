@@ -921,19 +921,33 @@ export class TerminalUI {
 
       const limit = this.chatMessageLimits.get(this.selectedChat.id) || 50;
       const msgs = this.db.getMessages(this.selectedChat.id, limit);
+
+      const previouslySelectedMsgId = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
+        ? this.currentMessages[this.selectedMessageIndex]?.id
+        : null;
+      const prevChildBase = (this.messageBox as any).childBase || 0;
+
       this.currentMessages = msgs;
 
-      if (this.selectedMessageIndex === -1 || !preserveScroll) {
-        this.selectedMessageIndex = Math.max(0, msgs.length - 1);
-      } else if (this.selectedMessageIndex >= msgs.length) {
-        this.selectedMessageIndex = msgs.length - 1;
-      }
-
       if (msgs.length === 0) {
+        this.selectedMessageIndex = -1;
         this.messageBox.setContent(' {gray-fg}~~~ No messages in this conversation yet. Press [i] or [Enter] to send a message. ~~~{/}');
         this.visibleMediaList = [];
         (this.messageBox as any).parseContent();
       } else {
+        if (!preserveScroll || this.selectedMessageIndex === -1) {
+          this.selectedMessageIndex = Math.max(0, msgs.length - 1);
+        } else if (previouslySelectedMsgId) {
+          const foundIdx = msgs.findIndex(m => m.id === previouslySelectedMsgId);
+          if (foundIdx !== -1) {
+            this.selectedMessageIndex = foundIdx;
+          } else {
+            this.selectedMessageIndex = Math.min(msgs.length - 1, Math.max(0, this.selectedMessageIndex));
+          }
+        } else {
+          this.selectedMessageIndex = Math.min(msgs.length - 1, Math.max(0, this.selectedMessageIndex));
+        }
+
         const renderedLines: string[] = [];
         const newMediaList: VisibleMedia[] = [];
 
@@ -1018,6 +1032,9 @@ export class TerminalUI {
 
         if (!preserveScroll) {
           this.messageBox.setScrollPerc(100);
+        } else {
+          (this.messageBox as any).childBase = prevChildBase;
+          this.messageBox.scrollTo(prevChildBase);
         }
       }
 
