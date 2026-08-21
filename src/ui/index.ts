@@ -279,13 +279,13 @@ export class TerminalUI {
       top: 'center',
       left: 'center',
       width: 58,
-      height: 10,
+      height: 11,
       tags: true,
       hidden: true,
       border: {
         type: 'line'
       },
-      label: ' {bold}{green-fg}⚙️ Configuración / Modelo de Voxtype{/} ',
+      label: ' {bold}{green-fg}⚙️ Configuración / Menú Principal{/} ',
       style: {
         bg: 'black',
         fg: 'white',
@@ -468,13 +468,14 @@ export class TerminalUI {
       }
     });
 
-    // 1-6 reaction shortcuts on selected message or 1-3 in menu
+    // 1-6 reaction shortcuts on selected message or 1-4 in menu
     for (const key of ['1', '2', '3', '4', '5', '6']) {
       this.screen.key([key], async () => {
         if (this.isMenuOpen) {
           if (key === '1') this.selectVoxtypeModel('tiny');
           else if (key === '2') this.selectVoxtypeModel('base');
           else if (key === '3') this.selectVoxtypeModel('small');
+          else if (key === '4') await this.handleLogout();
           return;
         }
         if (this.activePanel === 'messages' && this.selectedChat && this.selectedMessageIndex >= 0) {
@@ -503,12 +504,13 @@ export class TerminalUI {
       }
     });
 
-    this.screen.key(['enter', 'r'], () => {
+    this.screen.key(['enter', 'r'], async () => {
       if (this.isMenuOpen) {
         const idx = (this.menuBox as any).selected;
         if (idx === 0) this.selectVoxtypeModel('tiny');
         else if (idx === 1) this.selectVoxtypeModel('base');
         else if (idx === 2) this.selectVoxtypeModel('small');
+        else if (idx === 3) await this.handleLogout();
         else this.closeMenu();
         return;
       }
@@ -721,12 +723,21 @@ export class TerminalUI {
       ` 1. Tiny Multi  (74 MB  - Ultra Rápido)${check(isTiny)}`,
       ` 2. Base Multi  (141 MB - Balanceado)${check(isBase)}`,
       ` 3. Small Multi (465 MB - Mayor Precisión)${check(isSmall)}`,
+      ` 4. {red-fg}🚪 Cerrar Sesión (Logout / Desvincular){/}`,
       ` {gray-fg}─── [Esc / q] Cerrar Menú ───{/}`
     ];
 
     this.menuBox.setItems(items);
     const activeIdx = isTiny ? 0 : (isBase ? 1 : 2);
     (this.menuBox as any).select(activeIdx);
+  }
+
+  private async handleLogout() {
+    this.closeMenu();
+    this.audioPlayer.stop();
+    this.header.setContent(' {bold}{yellow-fg}● Cerrando sesión y desvinculando WhatsApp...{/}');
+    this.screen.render();
+    await this.waService.logout();
   }
 
   private selectVoxtypeModel(model: 'tiny' | 'base' | 'small') {

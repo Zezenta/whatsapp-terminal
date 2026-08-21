@@ -909,4 +909,28 @@ export class WhatsAppService {
       this.sock = null;
     }
   }
+
+  public async logout(): Promise<void> {
+    try {
+      if (this.sock) {
+        await this.sock.logout().catch(() => {});
+        this.sock.end(new Error('User logged out'));
+      }
+    } catch {}
+
+    try {
+      if (fs.existsSync(this.authDir)) {
+        fs.rmSync(this.authDir, { recursive: true, force: true });
+        fs.mkdirSync(this.authDir, { recursive: true });
+      }
+    } catch {}
+
+    this.sock = null;
+    this.isConnecting = false;
+    this.events.onStatusChange?.('qr');
+
+    setTimeout(() => {
+      this.connect();
+    }, 600);
+  }
 }
