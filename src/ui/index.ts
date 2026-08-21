@@ -8,6 +8,7 @@ import { Chat, Message, ConnectionStatus } from '../types/index.js';
 import { LocalDatabase } from '../db/index.js';
 import { WhatsAppService } from '../whatsapp/client.js';
 import { prepareImageForKitty, createKittyPlacement, clearAllKittyImages, PreparedImage } from './media.js';
+import { AudioPlayer, AudioState, transcribeAudioWithVoxtype } from './audio.js';
 
 function formatTimestamp24h(timestamp: number): string {
   if (!timestamp || timestamp <= 0) return '';
@@ -17,6 +18,13 @@ function formatTimestamp24h(timestamp: number): string {
   const hours = String(d.getHours()).padStart(2, '0');
   const minutes = String(d.getMinutes()).padStart(2, '0');
   return `${day}/${month} ${hours}:${minutes}`;
+}
+
+function formatSeconds(sec: number): string {
+  const total = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function sanitizeTextForTui(text: string): string {
@@ -50,16 +58,20 @@ export class TerminalUI {
   private chatList: blessed.Widgets.ListElement;
   private chatHeader: blessed.Widgets.BoxElement;
   private messageBox: blessed.Widgets.BoxElement;
+  private audioBar: blessed.Widgets.BoxElement;
   private inputBox: blessed.Widgets.TextboxElement;
   private qrBox: blessed.Widgets.BoxElement;
 
   private db: LocalDatabase;
   private waService: WhatsAppService;
+  private audioPlayer: AudioPlayer;
+
   private chats: Chat[] = [];
   private selectedChat: Chat | null = null;
   private activePanel: 'chats' | 'messages' | 'input' = 'chats';
   private chatMessageLimits = new Map<string, number>();
   private isLoadingOlder = false;
+  private isTranscribing = false;
   private visibleMediaList: VisibleMedia[] = [];
   private lastRenderedKittyState = '';
 
@@ -85,13 +97,17 @@ export class TerminalUI {
       }
     });
 
+    this.audioPlayer = new AudioPlayer((state) => {
+      this.renderAudioBar(state);
+    });
+
     this.header = blessed.box({
       top: 0,
       left: 0,
       width: '100%',
       height: 1,
       tags: true,
-      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [1-6] React | [o/O] Image | [q] Quit{/}',
+      content: ' {bold}{green-fg}● WhatsApp Terminal{/} | {yellow-fg}Connecting...{/} | {gray-fg}[Tab] Switch | [↑/↓] Select | [P] Audio | [T] Voxtype | [Enter] Reply{/}',
       style: {
         bg: 'black',
         fg: 'white',
@@ -184,6 +200,26 @@ export class TerminalUI {
       }
     });
 
+    this.audioBar = blessed.box({
+      top: '100%-6',
+      left: '32%',
+      width: '68%',
+      height: 3,
+      tags: true,
+      hidden: true,
+      border: {
+        type: 'line'
+      },
+      style: {
+        bg: 'black',
+        transparent: false,
+        border: {
+          fg: '#25D366'
+        },
+        fg: 'white'
+      }
+    });
+
     this.inputBox = blessed.textbox({
       top: '100%-3',
       left: '32%',
@@ -233,6 +269,7 @@ export class TerminalUI {
     this.screen.append(this.chatList);
     this.screen.append(this.chatHeader);
     this.screen.append(this.messageBox);
+    this.screen.append(this.audioBar);
     this.screen.append(this.inputBox);
     this.screen.append(this.qrBox);
 
@@ -249,6 +286,7 @@ export class TerminalUI {
 
   private setupKeybindings() {
     this.screen.key(['C-c'], () => {
+      this.audioPlayer.stop();
       this.waService.disconnect();
       process.stdout.write(clearAllKittyImages());
       return process.exit(0);
@@ -269,7 +307,11 @@ export class TerminalUI {
         (this.chatList as any).up(1);
         this.onChatSelectionChanged();
       } else if (this.activePanel === 'messages') {
-        this.selectPreviousMessage();
+        if (this.audioPlayer.isActive()) {
+          this.audioPlayer.adjustSpeed('up');
+        } else {
+          this.selectPreviousMessage();
+        }
       }
     });
 
@@ -278,7 +320,37 @@ export class TerminalUI {
         (this.chatList as any).down(1);
         this.onChatSelectionChanged();
       } else if (this.activePanel === 'messages') {
-        this.selectNextMessage();
+        if (this.audioPlayer.isActive()) {
+          this.audioPlayer.adjustSpeed('down');
+        } else {
+          this.selectNextMessage();
+        }
+      }
+    });
+
+    this.screen.key(['left', 'h'], () => {
+      if (this.activePanel === 'messages' && this.audioPlayer.isActive()) {
+        this.audioPlayer.seek(-5);
+      }
+    });
+
+    this.screen.key(['right', 'l'], () => {
+      if (this.activePanel === 'messages' && this.audioPlayer.isActive()) {
+        this.audioPlayer.seek(5);
+      }
+    });
+
+    // Play/Pause audio with 'P' / 'p'
+    this.screen.key(['p', 'P'], async () => {
+      if (this.activePanel === 'messages' && this.selectedChat) {
+        await this.handleAudioToggle();
+      }
+    });
+
+    // Transcribe audio with 'T' / 't' via local voxtype
+    this.screen.key(['t', 'T'], async () => {
+      if (this.activePanel === 'messages' && this.selectedChat) {
+        await this.handleAudioTranscribe();
       }
     });
 
@@ -344,7 +416,7 @@ export class TerminalUI {
       });
     }
 
-    // Open image of selected message (or latest media in chat)
+    // Open image/video/media
     this.screen.key(['o', 'O', 'v', 'V'], async () => {
       if (this.activePanel !== 'input' && this.selectedChat) {
         const selectedMsg = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
@@ -382,6 +454,10 @@ export class TerminalUI {
 
     this.screen.key(['q'], () => {
       if (this.activePanel !== 'input') {
+        if (this.audioPlayer.isActive()) {
+          this.audioPlayer.stop();
+          return;
+        }
         this.waService.disconnect();
         process.stdout.write(clearAllKittyImages());
         return process.exit(0);
@@ -413,6 +489,135 @@ export class TerminalUI {
       this.inputBox.setValue('');
       this.setFocus('messages');
     });
+  }
+
+  private async handleAudioToggle() {
+    const selectedMsg = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
+      ? this.currentMessages[this.selectedMessageIndex]
+      : null;
+
+    if (selectedMsg && selectedMsg.kind === 'audio') {
+      if (this.audioPlayer.getActiveMsgId() === selectedMsg.id) {
+        this.audioPlayer.togglePause();
+        return;
+      }
+
+      let audioFile = selectedMsg.mediaPath;
+      if (!audioFile || !fs.existsSync(audioFile)) {
+        const checkOgg = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.ogg`);
+        const checkMp3 = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.mp3`);
+        if (fs.existsSync(checkOgg)) audioFile = checkOgg;
+        else if (fs.existsSync(checkMp3)) audioFile = checkMp3;
+      }
+
+      if (!audioFile || !fs.existsSync(audioFile)) {
+        this.header.setContent(' {bold}{yellow-fg}● Downloading audio from WhatsApp...{/}');
+        this.screen.render();
+        const dl = await this.waService.downloadMediaForMessage(selectedMsg.id);
+        if (dl && fs.existsSync(dl)) {
+          audioFile = dl;
+        }
+      }
+
+      if (audioFile && fs.existsSync(audioFile)) {
+        await this.audioPlayer.play(audioFile, selectedMsg.id);
+      } else {
+        this.header.setContent(' {bold}{red-fg}● Could not download or play audio{/}');
+        this.screen.render();
+      }
+    } else if (this.audioPlayer.isActive()) {
+      this.audioPlayer.togglePause();
+    }
+  }
+
+  private async handleAudioTranscribe() {
+    if (this.isTranscribing) return;
+
+    const selectedMsg = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
+      ? this.currentMessages[this.selectedMessageIndex]
+      : null;
+
+    if (!selectedMsg || selectedMsg.kind !== 'audio') {
+      this.header.setContent(' {bold}{yellow-fg}● Select an audio message to transcribe with [T]{/}');
+      this.screen.render();
+      return;
+    }
+
+    let audioFile = selectedMsg.mediaPath;
+    if (!audioFile || !fs.existsSync(audioFile)) {
+      const checkOgg = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.ogg`);
+      const checkMp3 = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.mp3`);
+      if (fs.existsSync(checkOgg)) audioFile = checkOgg;
+      else if (fs.existsSync(checkMp3)) audioFile = checkMp3;
+    }
+
+    if (!audioFile || !fs.existsSync(audioFile)) {
+      this.header.setContent(' {bold}{yellow-fg}● Downloading audio for transcription...{/}');
+      this.screen.render();
+      const dl = await this.waService.downloadMediaForMessage(selectedMsg.id);
+      if (dl && fs.existsSync(dl)) {
+        audioFile = dl;
+      }
+    }
+
+    if (!audioFile || !fs.existsSync(audioFile)) {
+      this.header.setContent(' {bold}{red-fg}● Could not download audio for transcription{/}');
+      this.screen.render();
+      return;
+    }
+
+    this.isTranscribing = true;
+    this.header.setContent(` {bold}{yellow-fg}● Transcribing audio from ${selectedMsg.senderName} with voxtype (Whisper)...{/}`);
+    this.screen.render();
+
+    try {
+      const transcribed = await transcribeAudioWithVoxtype(audioFile);
+      if (transcribed && transcribed.trim() !== '') {
+        selectedMsg.text = `[Audio 🎤]: "${transcribed.trim()}"`;
+        this.db.saveMessage(selectedMsg);
+        this.header.setContent(` {bold}{green-fg}● Transcription complete for ${selectedMsg.senderName}!{/}`);
+        await this.loadMessagesForSelectedChat(true);
+      } else {
+        this.header.setContent(' {bold}{yellow-fg}● Transcription finished: No speech detected{/}');
+        this.screen.render();
+      }
+    } catch (err: any) {
+      this.header.setContent(` {bold}{red-fg}● Transcription error: ${err?.message || 'voxtype error'}{/}`);
+      this.screen.render();
+    } finally {
+      this.isTranscribing = false;
+    }
+  }
+
+  private renderAudioBar(state: AudioState | null) {
+    if (!state) {
+      this.audioBar.hide();
+      this.messageBox.height = '100%-7';
+      this.updateHeader();
+      this.screen.render();
+      return;
+    }
+
+    this.audioBar.show();
+    this.messageBox.height = '100%-10';
+
+    const msg = this.currentMessages.find(m => m.id === state.msgId);
+    const sender = msg ? msg.senderName : 'Audio';
+
+    const progress = state.duration > 0 ? Math.min(1, state.currentTime / state.duration) : 0;
+    const barWidth = 24;
+    const filled = Math.round(progress * barWidth);
+    const bar = '━'.repeat(filled) + '●' + '─'.repeat(Math.max(0, barWidth - filled));
+
+    const curTime = formatSeconds(state.currentTime);
+    const durTime = formatSeconds(state.duration);
+    const statusIcon = state.isPlaying ? '{green-fg}▶ Playing{/}' : '{yellow-fg}⏸ Paused{/}';
+
+    const content = ` ${statusIcon} {bold}@${sender}{/} {cyan-fg}[${bar}]{/} {bold}${curTime}{/}/{gray-fg}${durTime}{/} {magenta-fg}[${state.speed.toFixed(2)}x]{/} | {gray-fg}[P] Pause [←/→] ±5s [↑/↓] Speed [T] Transcribe [q] Close{/}`;
+
+    this.audioBar.setContent(content);
+    this.updateHeader();
+    this.screen.render();
   }
 
   private async selectPreviousMessage() {
@@ -622,8 +827,10 @@ export class TerminalUI {
       }
     } else if (this.activePanel === 'messages') {
       const selectedMsg = this.selectedMessageIndex >= 0 ? this.currentMessages[this.selectedMessageIndex] : null;
-      const reactionInfo = selectedMsg ? ' | [1]👍 [2]❤️ [3]😂 [4]😮 [5]😢 [6]🙏' : '';
-      this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply | [o/O] Open Media${reactionInfo}{/} | {gray-fg}[Tab] Chats | [q] Quit{/}`);
+      const isAudio = selectedMsg?.kind === 'audio';
+      const audioTip = isAudio ? ' | {magenta-fg}[P] Play Audio [T] Voxtype{/}' : '';
+      const reactionInfo = selectedMsg ? ' | [1-6] React' : '';
+      this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply${audioTip}${reactionInfo}{/} | {gray-fg}[Tab] Chats | [o/O] Media | [q] Quit{/}`);
       this.inputBox.setLabel(' {gray-fg}Press [i/Enter] to type{/} ');
     } else {
       this.header.setContent(' {bold}{green-fg}● WhatsApp Terminal{/} | {gray-fg}[Tab] Messages | [↑/↓] Select Chat | [i/Enter] Type | [q] Quit{/}');
@@ -890,7 +1097,7 @@ export class TerminalUI {
     if (status === 'connected') {
       this.hideQR();
       const user = detail ? ` | ${detail.split('@')[0]}` : '';
-      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [o/O] Image | [q] Quit{/}`);
+      this.header.setContent(` {bold}{green-fg}● Online{/}${user} | {gray-fg}[Tab] Switch | [↑/↓] Select | [P] Audio | [T] Voxtype | [Enter] Reply | [q] Quit{/}`);
     } else if (status === 'qr') {
       this.header.setContent(' {bold}{yellow-fg}● Scan QR Code{/} | {gray-fg}Waiting for phone scan...{/}');
     } else if (status === 'connecting') {
@@ -903,7 +1110,7 @@ export class TerminalUI {
   }
 
   public updateSyncProgress(info: string) {
-    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [↑/↓] Select Msg | [Enter] Reply | [q] Quit{/}`);
+    this.header.setContent(` {bold}{green-fg}● Online{/} | {yellow-fg}${info}{/} | {gray-fg}[Tab] Switch | [↑/↓] Select | [P] Audio | [Enter] Reply | [q] Quit{/}`);
     this.screen.render();
   }
 

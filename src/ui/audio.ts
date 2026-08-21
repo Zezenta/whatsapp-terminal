@@ -1,0 +1,246 @@
+import { spawn, ChildProcess } from 'node:child_process';
+import net from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+export interface AudioState {
+  msgId: string;
+  filePath: string;
+  isPlaying: boolean;
+  currentTime: number;
+  duration: number;
+  speed: number;
+}
+
+export class AudioPlayer {
+  private mpvProcess: ChildProcess | null = null;
+  private ipcSocket: net.Socket | null = null;
+  private socketPath: string = '';
+  private pollTimer: NodeJS.Timeout | null = null;
+  private currentMsgId: string | null = null;
+  private currentFilePath: string | null = null;
+  private isPlaying: boolean = false;
+  private currentTime: number = 0;
+  private duration: number = 0;
+  private speed: number = 1.0;
+  private onStateChange: ((state: AudioState | null) => void) | null = null;
+
+  private readonly SPEED_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+  constructor(onStateChange?: (state: AudioState | null) => void) {
+    if (onStateChange) this.onStateChange = onStateChange;
+  }
+
+  public isActive(): boolean {
+    return this.currentMsgId !== null;
+  }
+
+  public getActiveMsgId(): string | null {
+    return this.currentMsgId;
+  }
+
+  public getState(): AudioState | null {
+    if (!this.currentMsgId || !this.currentFilePath) return null;
+    return {
+      msgId: this.currentMsgId,
+      filePath: this.currentFilePath,
+      isPlaying: this.isPlaying,
+      currentTime: this.currentTime,
+      duration: this.duration,
+      speed: this.speed
+    };
+  }
+
+  public async play(filePath: string, msgId: string) {
+    if (this.currentMsgId === msgId) {
+      this.togglePause();
+      return;
+    }
+
+    this.stop();
+
+    this.currentMsgId = msgId;
+    this.currentFilePath = filePath;
+    this.isPlaying = true;
+    this.currentTime = 0;
+    this.duration = 0;
+    this.socketPath = path.join(os.tmpdir(), `mpv_wa_${Date.now()}_${Math.random().toString(36).slice(2)}.sock`);
+
+    try { fs.unlinkSync(this.socketPath); } catch {}
+
+    this.mpvProcess = spawn('mpv', [
+      '--no-video',
+      '--no-terminal',
+      `--input-ipc-server=${this.socketPath}`,
+      `--speed=${this.speed}`,
+      filePath
+    ], { stdio: 'ignore' });
+
+    this.mpvProcess.on('error', () => {
+      this.stop();
+    });
+
+    this.mpvProcess.on('close', () => {
+      this.stop();
+    });
+
+    setTimeout(() => {
+      if (!this.currentMsgId) return;
+      this.connectIPC();
+    }, 150);
+
+    this.notifyState();
+  }
+
+  private connectIPC() {
+    if (!fs.existsSync(this.socketPath)) return;
+    this.ipcSocket = net.createConnection(this.socketPath, () => {
+      this.startPolling();
+    });
+
+    this.ipcSocket.on('data', (data) => {
+      const lines = data.toString().split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.event === 'end-file' || parsed.event === 'shutdown') {
+            this.stop();
+            return;
+          }
+        } catch {}
+      }
+    });
+
+    this.ipcSocket.on('error', () => {
+      // Handled
+    });
+  }
+
+  private startPolling() {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = setInterval(() => {
+      if (!this.ipcSocket || this.ipcSocket.destroyed) return;
+      this.sendIpcCommand(['get_property', 'time-pos'], (res) => {
+        if (typeof res?.data === 'number') this.currentTime = res.data;
+      });
+      this.sendIpcCommand(['get_property', 'duration'], (res) => {
+        if (typeof res?.data === 'number') this.duration = res.data;
+      });
+      this.sendIpcCommand(['get_property', 'pause'], (res) => {
+        if (typeof res?.data === 'boolean') this.isPlaying = !res.data;
+      });
+      this.sendIpcCommand(['get_property', 'speed'], (res) => {
+        if (typeof res?.data === 'number') this.speed = res.data;
+      });
+      this.notifyState();
+    }, 200);
+  }
+
+  private sendIpcCommand(command: any[], callback?: (res: any) => void) {
+    if (!this.ipcSocket || this.ipcSocket.destroyed) return;
+    try {
+      this.ipcSocket.write(JSON.stringify({ command }) + '\n');
+    } catch {}
+  }
+
+  public togglePause() {
+    if (!this.currentMsgId) return;
+    this.sendIpcCommand(['cycle', 'pause']);
+    this.isPlaying = !this.isPlaying;
+    this.notifyState();
+  }
+
+  public seek(seconds: number) {
+    if (!this.currentMsgId) return;
+    this.sendIpcCommand(['seek', seconds, 'relative']);
+    this.currentTime = Math.max(0, this.currentTime + seconds);
+    this.notifyState();
+  }
+
+  public adjustSpeed(direction: 'up' | 'down') {
+    if (!this.currentMsgId) return;
+    let currentIndex = this.SPEED_STEPS.findIndex(s => Math.abs(s - this.speed) < 0.05);
+    if (currentIndex === -1) currentIndex = 2; // default 1.0
+
+    if (direction === 'up') {
+      if (currentIndex < this.SPEED_STEPS.length - 1) {
+        currentIndex++;
+      }
+    } else {
+      if (currentIndex > 0) {
+        currentIndex--;
+      }
+    }
+
+    this.speed = this.SPEED_STEPS[currentIndex];
+    this.sendIpcCommand(['set_property', 'speed', this.speed]);
+    this.notifyState();
+  }
+
+  public stop() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.ipcSocket) {
+      try { this.ipcSocket.destroy(); } catch {}
+      this.ipcSocket = null;
+    }
+    if (this.mpvProcess) {
+      try { this.mpvProcess.kill(); } catch {}
+      this.mpvProcess = null;
+    }
+    if (this.socketPath) {
+      try { fs.unlinkSync(this.socketPath); } catch {}
+      this.socketPath = '';
+    }
+    this.currentMsgId = null;
+    this.currentFilePath = null;
+    this.isPlaying = false;
+    this.currentTime = 0;
+    this.duration = 0;
+    this.notifyState();
+  }
+
+  private notifyState() {
+    this.onStateChange?.(this.getState());
+  }
+}
+
+export async function transcribeAudioWithVoxtype(audioPath: string): Promise<string> {
+  const tempWav = path.join(os.tmpdir(), `voxtype_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn('ffmpeg', ['-y', '-i', audioPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', tempWav], {
+        stdio: 'ignore'
+      });
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`ffmpeg conversion failed (${code})`));
+      });
+      proc.on('error', reject);
+    });
+
+    return await new Promise<string>((resolve, reject) => {
+      const proc = spawn('voxtype', ['transcribe', tempWav]);
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        if (code === 0) {
+          const cleanLines = stdout.split('\n')
+            .map(l => l.trim())
+            .filter(l => l && !l.startsWith('Loading audio file:') && !l.startsWith('Audio format:') && !l.startsWith('Processing ') && !l.includes('INFO '));
+          resolve(cleanLines.join(' ').trim());
+        } else {
+          reject(new Error(stderr || `voxtype error code ${code}`));
+        }
+      });
+      proc.on('error', reject);
+    });
+  } finally {
+    try { fs.unlinkSync(tempWav); } catch {}
+  }
+}
