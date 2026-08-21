@@ -886,8 +886,13 @@ export class TerminalUI {
         if (found !== -1) newIdx = found;
       }
       (this.chatList as any).select(newIdx);
-      this.selectedChat = this.chats[newIdx];
-      this.loadMessagesForSelectedChat(false);
+
+      if (!this.selectedChat) {
+        this.selectedChat = this.chats[newIdx];
+        this.loadMessagesForSelectedChat(false);
+      } else {
+        this.selectedChat = this.chats[newIdx];
+      }
     }
 
     this.screen.render();
