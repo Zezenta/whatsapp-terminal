@@ -72,6 +72,7 @@ export class TerminalUI {
   private chatMessageLimits = new Map<string, number>();
   private isLoadingOlder = false;
   private isTranscribing = false;
+  private mediaReloadTimer: NodeJS.Timeout | null = null;
   private visibleMediaList: VisibleMedia[] = [];
   private lastRenderedKittyState = '';
 
@@ -179,7 +180,7 @@ export class TerminalUI {
       tags: true,
       wrap: true,
       scrollable: true,
-      alwaysScroll: true,
+      alwaysScroll: false,
       mouse: true,
       border: {
         type: 'line'
@@ -637,13 +638,12 @@ export class TerminalUI {
     if (this.currentMessages.length === 0) return;
 
     if (this.selectedMessageIndex <= 0) {
-      this.selectedMessageIndex = 0;
       await this.loadMoreOlderMessages();
     } else {
       this.selectedMessageIndex--;
       await this.loadMessagesForSelectedChat(true);
+      this.scrollToSelectedMessage();
     }
-    this.scrollToSelectedMessage();
   }
 
   private async selectNextMessage() {
@@ -652,8 +652,8 @@ export class TerminalUI {
     if (this.selectedMessageIndex < this.currentMessages.length - 1) {
       this.selectedMessageIndex++;
       await this.loadMessagesForSelectedChat(true);
+      this.scrollToSelectedMessage();
     }
-    this.scrollToSelectedMessage();
   }
 
   private scrollToSelectedMessage() {
@@ -670,10 +670,13 @@ export class TerminalUI {
     const visibleHeight = (this.messageBox as any).height - 2;
 
     if (lineIdx < childBase) {
+      (this.messageBox as any).childBase = lineIdx;
       this.messageBox.scrollTo(lineIdx);
       this.screen.render();
     } else if (lineIdx >= childBase + visibleHeight - 2) {
-      this.messageBox.scrollTo(lineIdx - visibleHeight + 3);
+      const target = Math.max(0, lineIdx - visibleHeight + 3);
+      (this.messageBox as any).childBase = target;
+      this.messageBox.scrollTo(target);
       this.screen.render();
     }
   }
@@ -698,6 +701,8 @@ export class TerminalUI {
     const currentLimit = this.chatMessageLimits.get(chatId) || 50;
     const countInDb = this.db.getMessageCount(chatId);
 
+    const topMsgId = this.currentMessages[0]?.id;
+
     if (currentLimit >= countInDb) {
       this.updateSyncProgress('Loading older messages from WhatsApp...');
       await this.waService.fetchOlderMessages(chatId, 50);
@@ -705,18 +710,16 @@ export class TerminalUI {
 
     this.chatMessageLimits.set(chatId, currentLimit + 50);
 
-    const prevScrollHeight = (this.messageBox as any).getScrollHeight();
     await this.loadMessagesForSelectedChat(true);
-    const newScrollHeight = (this.messageBox as any).getScrollHeight();
 
-    const delta = newScrollHeight - prevScrollHeight;
-    if (delta > 0) {
-      this.messageBox.scrollTo(delta);
-    } else {
-      this.messageBox.scrollTo(0);
+    if (topMsgId) {
+      const newIdx = this.currentMessages.findIndex(m => m.id === topMsgId);
+      if (newIdx !== -1) {
+        this.selectedMessageIndex = Math.max(0, newIdx - 1);
+      }
     }
 
-    this.screen.render();
+    this.scrollToSelectedMessage();
     this.isLoadingOlder = false;
   }
 
@@ -998,7 +1001,10 @@ export class TerminalUI {
               if (m.rawMsg) {
                 this.waService.downloadMediaForMessage(m.id).then((dl) => {
                   if (dl) {
-                    this.loadMessagesForSelectedChat(true);
+                    if (this.mediaReloadTimer) clearTimeout(this.mediaReloadTimer);
+                    this.mediaReloadTimer = setTimeout(() => {
+                      this.loadMessagesForSelectedChat(true);
+                    }, 400);
                   }
                 });
               }
