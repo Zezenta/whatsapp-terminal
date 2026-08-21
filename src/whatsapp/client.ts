@@ -481,6 +481,12 @@ export class WhatsAppService {
   }
 
   public async downloadMediaForMessage(msgId: string): Promise<string | null> {
+    const possibleOgg = path.join(this.mediaDir, `${msgId}.ogg`);
+    if (fs.existsSync(possibleOgg)) return possibleOgg;
+    const possibleMp3 = path.join(this.mediaDir, `${msgId}.mp3`);
+    if (fs.existsSync(possibleMp3)) return possibleMp3;
+    const possibleM4a = path.join(this.mediaDir, `${msgId}.m4a`);
+    if (fs.existsSync(possibleM4a)) return possibleM4a;
     const possibleJpg = path.join(this.mediaDir, `${msgId}.jpg`);
     if (fs.existsSync(possibleJpg)) return possibleJpg;
     const possibleWebp = path.join(this.mediaDir, `${msgId}.webp`);
@@ -494,9 +500,10 @@ export class WhatsAppService {
     try {
       const m = JSON.parse(rawJson) as WAMessage;
       const unwrapped = unwrapMessage(m.message);
+      const isAudio = Boolean(unwrapped?.audioMessage);
       const isSticker = Boolean(unwrapped?.stickerMessage);
       const isVideo = Boolean(unwrapped?.videoMessage);
-      const ext = isSticker ? 'webp' : (isVideo ? 'mp4' : 'jpg');
+      const ext = isAudio ? 'ogg' : (isSticker ? 'webp' : (isVideo ? 'mp4' : 'jpg'));
       const targetFile = path.join(this.mediaDir, `${msgId}.${ext}`);
 
       const buffer = await downloadMediaMessage(m, 'buffer', {}, {

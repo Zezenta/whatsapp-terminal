@@ -17,7 +17,6 @@ export class AudioPlayer {
   private mpvProcess: ChildProcess | null = null;
   private ipcSocket: net.Socket | null = null;
   private socketPath: string = '';
-  private pollTimer: NodeJS.Timeout | null = null;
   private currentMsgId: string | null = null;
   private currentFilePath: string | null = null;
   private isPlaying: boolean = false;
@@ -95,16 +94,39 @@ export class AudioPlayer {
 
   private connectIPC() {
     if (!fs.existsSync(this.socketPath)) return;
+
     this.ipcSocket = net.createConnection(this.socketPath, () => {
-      this.startPolling();
+      this.sendIpcCommand(['observe_property', 1, 'time-pos']);
+      this.sendIpcCommand(['observe_property', 2, 'duration']);
+      this.sendIpcCommand(['observe_property', 3, 'pause']);
+      this.sendIpcCommand(['observe_property', 4, 'speed']);
     });
 
+    let buffer = '';
     this.ipcSocket.on('data', (data) => {
-      const lines = data.toString().split('\n').filter(Boolean);
+      buffer += data.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
       for (const line of lines) {
+        if (!line.trim()) continue;
         try {
-          const parsed = JSON.parse(line);
-          if (parsed.event === 'end-file' || parsed.event === 'shutdown') {
+          const msg = JSON.parse(line.trim());
+          if (msg.event === 'property-change') {
+            if (msg.name === 'time-pos' && typeof msg.data === 'number') {
+              this.currentTime = msg.data;
+              this.notifyState();
+            } else if (msg.name === 'duration' && typeof msg.data === 'number') {
+              this.duration = msg.data;
+              this.notifyState();
+            } else if (msg.name === 'pause' && typeof msg.data === 'boolean') {
+              this.isPlaying = !msg.data;
+              this.notifyState();
+            } else if (msg.name === 'speed' && typeof msg.data === 'number') {
+              this.speed = msg.data;
+              this.notifyState();
+            }
+          } else if (msg.event === 'end-file' || msg.event === 'shutdown') {
             this.stop();
             return;
           }
@@ -113,31 +135,11 @@ export class AudioPlayer {
     });
 
     this.ipcSocket.on('error', () => {
-      // Handled
+      // Socket disconnected
     });
   }
 
-  private startPolling() {
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = setInterval(() => {
-      if (!this.ipcSocket || this.ipcSocket.destroyed) return;
-      this.sendIpcCommand(['get_property', 'time-pos'], (res) => {
-        if (typeof res?.data === 'number') this.currentTime = res.data;
-      });
-      this.sendIpcCommand(['get_property', 'duration'], (res) => {
-        if (typeof res?.data === 'number') this.duration = res.data;
-      });
-      this.sendIpcCommand(['get_property', 'pause'], (res) => {
-        if (typeof res?.data === 'boolean') this.isPlaying = !res.data;
-      });
-      this.sendIpcCommand(['get_property', 'speed'], (res) => {
-        if (typeof res?.data === 'number') this.speed = res.data;
-      });
-      this.notifyState();
-    }, 200);
-  }
-
-  private sendIpcCommand(command: any[], callback?: (res: any) => void) {
+  private sendIpcCommand(command: any[]) {
     if (!this.ipcSocket || this.ipcSocket.destroyed) return;
     try {
       this.ipcSocket.write(JSON.stringify({ command }) + '\n');
@@ -147,15 +149,11 @@ export class AudioPlayer {
   public togglePause() {
     if (!this.currentMsgId) return;
     this.sendIpcCommand(['cycle', 'pause']);
-    this.isPlaying = !this.isPlaying;
-    this.notifyState();
   }
 
   public seek(seconds: number) {
     if (!this.currentMsgId) return;
     this.sendIpcCommand(['seek', seconds, 'relative']);
-    this.currentTime = Math.max(0, this.currentTime + seconds);
-    this.notifyState();
   }
 
   public adjustSpeed(direction: 'up' | 'down') {
@@ -175,14 +173,9 @@ export class AudioPlayer {
 
     this.speed = this.SPEED_STEPS[currentIndex];
     this.sendIpcCommand(['set_property', 'speed', this.speed]);
-    this.notifyState();
   }
 
   public stop() {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
     if (this.ipcSocket) {
       try { this.ipcSocket.destroy(); } catch {}
       this.ipcSocket = null;

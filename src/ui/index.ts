@@ -452,6 +452,13 @@ export class TerminalUI {
       }
     });
 
+    this.screen.key(['escape', 'Esc'], () => {
+      if (this.audioPlayer.isActive()) {
+        this.audioPlayer.stop();
+        return;
+      }
+    });
+
     this.screen.key(['q'], () => {
       if (this.activePanel !== 'input') {
         if (this.audioPlayer.isActive()) {
@@ -491,6 +498,16 @@ export class TerminalUI {
     });
   }
 
+  private resolveAudioFile(msgId: string, mediaPath?: string): string | null {
+    if (mediaPath && fs.existsSync(mediaPath)) return mediaPath;
+    const mediaDir = this.waService.getMediaDir();
+    for (const ext of ['ogg', 'mp3', 'm4a', 'wav', 'aac', 'opus', 'jpg']) {
+      const candidate = path.join(mediaDir, `${msgId}.${ext}`);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return null;
+  }
+
   private async handleAudioToggle() {
     const selectedMsg = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
       ? this.currentMessages[this.selectedMessageIndex]
@@ -502,15 +519,9 @@ export class TerminalUI {
         return;
       }
 
-      let audioFile = selectedMsg.mediaPath;
-      if (!audioFile || !fs.existsSync(audioFile)) {
-        const checkOgg = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.ogg`);
-        const checkMp3 = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.mp3`);
-        if (fs.existsSync(checkOgg)) audioFile = checkOgg;
-        else if (fs.existsSync(checkMp3)) audioFile = checkMp3;
-      }
+      let audioFile = this.resolveAudioFile(selectedMsg.id, selectedMsg.mediaPath);
 
-      if (!audioFile || !fs.existsSync(audioFile)) {
+      if (!audioFile) {
         this.header.setContent(' {bold}{yellow-fg}● Downloading audio from WhatsApp...{/}');
         this.screen.render();
         const dl = await this.waService.downloadMediaForMessage(selectedMsg.id);
@@ -543,15 +554,9 @@ export class TerminalUI {
       return;
     }
 
-    let audioFile = selectedMsg.mediaPath;
-    if (!audioFile || !fs.existsSync(audioFile)) {
-      const checkOgg = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.ogg`);
-      const checkMp3 = path.join(this.waService.getMediaDir(), `${selectedMsg.id}.mp3`);
-      if (fs.existsSync(checkOgg)) audioFile = checkOgg;
-      else if (fs.existsSync(checkMp3)) audioFile = checkMp3;
-    }
+    let audioFile = this.resolveAudioFile(selectedMsg.id, selectedMsg.mediaPath);
 
-    if (!audioFile || !fs.existsSync(audioFile)) {
+    if (!audioFile) {
       this.header.setContent(' {bold}{yellow-fg}● Downloading audio for transcription...{/}');
       this.screen.render();
       const dl = await this.waService.downloadMediaForMessage(selectedMsg.id);
@@ -567,7 +572,7 @@ export class TerminalUI {
     }
 
     this.isTranscribing = true;
-    this.header.setContent(` {bold}{yellow-fg}● Transcribing audio from ${selectedMsg.senderName} with voxtype (Whisper)...{/}`);
+    this.header.setContent(` {bold}{yellow-fg}● Transcribing audio with voxtype (Whisper local)...{/}`);
     this.screen.render();
 
     try {
