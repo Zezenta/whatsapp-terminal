@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { Chat, Message } from '../types/index.js';
+import { extractCleanTranscription } from '../ui/audio.js';
 
 export class LocalDatabase {
   private db: Database.Database;
@@ -20,6 +21,7 @@ export class LocalDatabase {
     this.mergeDuplicateLidChats();
     this.linkExistingMediaFiles();
     this.migrateQuotesAndReactions();
+    this.cleanCorruptedTranscriptions();
   }
 
   private initSchema() {
@@ -149,6 +151,17 @@ export class LocalDatabase {
             updateStmt.run(reaction, quotedMsgId, quotedText, quotedSender, m.id);
           }
         } catch {}
+      }
+    } catch {}
+  }
+
+  public cleanCorruptedTranscriptions() {
+    try {
+      const rows = this.db.prepare("SELECT id, transcription FROM messages WHERE transcription LIKE '%INFO%' OR transcription LIKE '%Loading audio file%'").all() as Array<{ id: string; transcription: string }>;
+      const updateStmt = this.db.prepare('UPDATE messages SET transcription = ? WHERE id = ?');
+      for (const r of rows) {
+        const cleaned = extractCleanTranscription(r.transcription);
+        updateStmt.run(cleaned || null, r.id);
       }
     } catch {}
   }

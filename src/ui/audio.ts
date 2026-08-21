@@ -201,6 +201,35 @@ export class AudioPlayer {
   }
 }
 
+export function extractCleanTranscription(rawOutput: string): string {
+  if (!rawOutput) return '';
+  const plain = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+  const lines = plain.split('\n');
+
+  const contentLines: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('Loading audio file:')) continue;
+    if (trimmed.startsWith('Audio format:')) continue;
+    if (trimmed.startsWith('Processing ')) continue;
+    if (/^\d{4}-\d{2}-\d{2}T/.test(trimmed)) continue;
+    if (trimmed.includes('INFO') || trimmed.includes('WARN') || trimmed.includes('ERROR')) continue;
+    contentLines.push(trimmed);
+  }
+
+  let result = contentLines.join('\n').trim();
+
+  if (!result) {
+    const match = plain.match(/Transcription completed in [^:]+:\s*"([\s\S]+?)"\s*$/m);
+    if (match) {
+      result = match[1].trim();
+    }
+  }
+
+  return result;
+}
+
 export async function transcribeAudioWithVoxtype(audioPath: string): Promise<string> {
   const tempWav = path.join(os.tmpdir(), `voxtype_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
   try {
@@ -223,15 +252,7 @@ export async function transcribeAudioWithVoxtype(audioPath: string): Promise<str
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.on('close', (code) => {
         if (code === 0) {
-          const cleanLines = stdout.split('\n')
-            .map(l => l.trim())
-            .filter(l => l && !l.startsWith('Loading audio file:') && !l.startsWith('Audio format:') && !l.startsWith('Processing ') && !l.includes('INFO '));
-          
-          let result = cleanLines.join(' ').trim();
-          if (!result && stdout.includes('Transcription completed in')) {
-            const match = stdout.match(/Transcription completed in [^:]+:\s*"([^"]+)"/);
-            if (match) result = match[1].trim();
-          }
+          const result = extractCleanTranscription(stdout);
           resolve(result);
         } else {
           reject(new Error(stderr || `voxtype error code ${code}`));

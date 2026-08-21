@@ -1005,7 +1005,7 @@ export class TerminalUI {
           if (m.transcription) {
             const sanitizedTrans = sanitizeTextForTui(m.transcription);
             const escapedTrans = blessed.escape(sanitizedTrans);
-            renderedLines.push(`    {yellow-fg}🎤 Transcripción:{/} {italic}"${escapedTrans}"{/}`);
+            renderedLines.push(`    {yellow-fg}🎤 Transcripción:{/} "${escapedTrans}"`);
           }
 
           const isSticker = m.kind === 'sticker';
