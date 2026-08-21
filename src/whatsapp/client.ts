@@ -132,9 +132,8 @@ export class WhatsAppService {
       logger: this.logger,
       printQRInTerminal: false,
       auth: state,
-      generateHighQualityLinkPreview: true,
-      syncFullHistory: true,
-      shouldSyncHistoryMessage: () => true
+      generateHighQualityLinkPreview: false,
+      syncFullHistory: false
     });
 
     this.sock.ev.on('creds.update', saveCreds);
@@ -153,16 +152,6 @@ export class WhatsAppService {
         this.events.onStatusChange?.('connected', userJid);
 
         this.loadGroupsAndChats();
-
-        try {
-          await (this.sock as any)?.resyncAppState?.(['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'], true);
-        } catch {
-          // Ignored
-        }
-
-        setTimeout(() => {
-          this.startBulkHistorySync();
-        }, 3000);
       }
 
       if (connection === 'close') {
@@ -737,11 +726,6 @@ export class WhatsAppService {
     const withRaw = missingMedia.filter(m => m.rawMsg);
     for (const m of withRaw) {
       this.downloadMediaForMessage(m.id);
-    }
-
-    const withoutRaw = missingMedia.filter(m => !m.rawMsg);
-    if (withoutRaw.length > 0) {
-      await this.resyncRecentChatHistory(canonicalChatId, 50);
     }
   }
 
