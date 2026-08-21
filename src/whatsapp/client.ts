@@ -35,6 +35,21 @@ function toNumber(t: any): number {
   return isNaN(parsed) ? 0 : parsed;
 }
 
+export function logIncomingEvent(event: string, data: any) {
+  const logFile = path.join(os.homedir(), '.config', 'whatsapp-terminal', 'raw_events.log');
+  try {
+    const timestamp = new Date().toISOString();
+    const entry = `\n==================== [${timestamp}] ${event} ====================\n` +
+      JSON.stringify(data, (k, v) => {
+        if (v instanceof Uint8Array || Buffer.isBuffer(v)) {
+          return `<Buffer len=${v.length}>`;
+        }
+        return v;
+      }, 2) + '\n';
+    fs.appendFileSync(logFile, entry);
+  } catch {}
+}
+
 function unwrapMessage(msg: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
   if (!msg) return msg;
   let unwrapped: any = msg;
@@ -267,7 +282,34 @@ export class WhatsAppService {
       this.events.onChatsUpdated?.(this.db.getChats());
     });
 
-    this.sock.ev.on('messages.upsert', async ({ messages: rawMessages }) => {
+    this.sock.ev.on('messages.upsert', async ({ messages: rawMessages, type }) => {
+      logIncomingEvent(`MESSAGES_UPSERT (${type || 'unknown'})`, {
+        count: rawMessages.length,
+        messages: rawMessages.map(m => {
+          const rawMsgObj = m.message;
+          const isViewOnce = Boolean(
+            rawMsgObj?.viewOnceMessage ||
+            rawMsgObj?.viewOnceMessageV2 ||
+            rawMsgObj?.viewOnceMessageV2Extension ||
+            (rawMsgObj as any)?.ephemeralMessage?.message?.viewOnceMessage ||
+            (rawMsgObj as any)?.ephemeralMessage?.message?.viewOnceMessageV2
+          );
+          const unwrapped = unwrapMessage(rawMsgObj);
+          return {
+            id: m.key.id,
+            remoteJid: m.key.remoteJid,
+            fromMe: m.key.fromMe,
+            participant: m.key.participant,
+            pushName: m.pushName,
+            messageTimestamp: m.messageTimestamp,
+            isViewOnce,
+            topKeys: rawMsgObj ? Object.keys(rawMsgObj) : [],
+            unwrappedKeys: unwrapped ? Object.keys(unwrapped) : [],
+            rawMessage: rawMsgObj
+          };
+        })
+      });
+
       for (const m of rawMessages) {
         if (!m.message) continue;
 
@@ -287,6 +329,10 @@ export class WhatsAppService {
         }
       }
       this.events.onChatsUpdated?.(this.db.getChats());
+    });
+
+    this.sock.ev.on('messages.update', (updates) => {
+      logIncomingEvent('MESSAGES_UPDATE', updates);
     });
 
     this.sock.ev.on('chats.upsert', (chats) => {
@@ -462,6 +508,12 @@ export class WhatsAppService {
     if (fs.existsSync(mediaFile)) return;
 
     this.downloadingMedia.add(msgId);
+    logIncomingEvent(`MEDIA_DOWNLOAD_TRIGGER [${ext}]`, {
+      msgId,
+      mediaFile,
+      messageKeys: m.message ? Object.keys(m.message) : [],
+      rawMsg: m.message
+    });
 
     downloadMediaMessage(m, 'buffer', {}, {
       logger: this.logger,
@@ -471,6 +523,11 @@ export class WhatsAppService {
         const tempFile = `${mediaFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
         fs.writeFileSync(tempFile, buffer);
         fs.renameSync(tempFile, mediaFile);
+        logIncomingEvent(`MEDIA_DOWNLOAD_SUCCESS [${ext}]`, {
+          msgId,
+          bytes: buffer.length,
+          savedPath: mediaFile
+        });
         if (ext === 'jpg' || ext === 'webp') {
           await prepareImageForKitty(mediaFile);
         }
@@ -482,7 +539,14 @@ export class WhatsAppService {
           this.events.onNewMessage?.(parsed);
         }
       })
-      .catch(() => {})
+      .catch((err) => {
+        logIncomingEvent(`MEDIA_DOWNLOAD_FAILED [${ext}]`, {
+          msgId,
+          errorMessage: err?.message,
+          stack: err?.stack,
+          rawError: err
+        });
+      })
       .finally(() => {
         this.downloadingMedia.delete(msgId);
       });
@@ -503,7 +567,10 @@ export class WhatsAppService {
     if (fs.existsSync(possibleMp4)) return possibleMp4;
 
     const rawJson = this.db.getRawMessage(msgId);
-    if (!rawJson) return null;
+    if (!rawJson) {
+      logIncomingEvent(`MANUAL_DOWNLOAD_FAILED (NO_RAW_JSON)`, { msgId });
+      return null;
+    }
 
     try {
       const m = JSON.parse(rawJson) as WAMessage;
@@ -514,6 +581,11 @@ export class WhatsAppService {
       const ext = isAudio ? 'ogg' : (isSticker ? 'webp' : (isVideo ? 'mp4' : 'jpg'));
       const targetFile = path.join(this.mediaDir, `${msgId}.${ext}`);
 
+      logIncomingEvent(`MANUAL_DOWNLOAD_START [${ext}]`, {
+        msgId,
+        unwrappedKeys: unwrapped ? Object.keys(unwrapped) : []
+      });
+
       const buffer = await downloadMediaMessage(m, 'buffer', {}, {
         logger: this.logger,
         reuploadRequest: (msg) => this.sock!.updateMediaMessage(msg)
@@ -521,6 +593,11 @@ export class WhatsAppService {
       const tempTarget = `${targetFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       fs.writeFileSync(tempTarget, buffer);
       fs.renameSync(tempTarget, targetFile);
+      logIncomingEvent(`MANUAL_DOWNLOAD_SUCCESS [${ext}]`, {
+        msgId,
+        bytes: buffer.length,
+        savedPath: targetFile
+      });
       if (ext === 'jpg' || ext === 'webp') {
         await prepareImageForKitty(targetFile);
       }
@@ -532,7 +609,12 @@ export class WhatsAppService {
       }
 
       return targetFile;
-    } catch {
+    } catch (err: any) {
+      logIncomingEvent(`MANUAL_DOWNLOAD_ERROR`, {
+        msgId,
+        errorMessage: err?.message,
+        stack: err?.stack
+      });
       return null;
     }
   }
