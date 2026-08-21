@@ -685,11 +685,12 @@ export class TerminalUI {
         this.db.saveMessage(selectedMsg);
         this.header.setContent(` {bold}{green-fg}● Transcripción completada (${this.voxtypeModel}): "${transcribed.trim().slice(0, 35)}..."{/}`);
         await this.loadMessagesForSelectedChat(true);
+        this.scrollToSelectedMessage();
         if (this.audioPlayer.isActive()) {
           this.renderAudioBar(this.audioPlayer.getState());
         }
       } else {
-        this.header.setContent(' {bold}{yellow-fg}● Transcripción finalizada: No se detectó voz{/}');
+        this.header.setContent(' {bold}{yellow-fg}● Transcripción finalizada: No se detectó voz o audio vacío{/}');
         this.screen.render();
       }
     } catch (err: any) {
@@ -815,6 +816,12 @@ export class TerminalUI {
     const msg = this.currentMessages[this.selectedMessageIndex];
     if (!msg) return;
 
+    if (this.selectedMessageIndex === this.currentMessages.length - 1) {
+      this.messageBox.setScrollPerc(100);
+      this.screen.render();
+      return;
+    }
+
     const clines = (this.messageBox as any)._clines || [];
     const tag = `__MSG_${msg.id}__`;
     const lineIdx = clines.findIndex((l: string) => l.includes(tag));
@@ -827,8 +834,8 @@ export class TerminalUI {
       (this.messageBox as any).childBase = lineIdx;
       this.messageBox.scrollTo(lineIdx);
       this.screen.render();
-    } else if (lineIdx >= childBase + visibleHeight - 2) {
-      const target = Math.max(0, lineIdx - visibleHeight + 3);
+    } else if (lineIdx >= childBase + visibleHeight - 3) {
+      const target = Math.max(0, lineIdx - visibleHeight + 4);
       (this.messageBox as any).childBase = target;
       this.messageBox.scrollTo(target);
       this.screen.render();
@@ -1201,7 +1208,7 @@ export class TerminalUI {
         this.messageBox.setContent(renderedLines.join('\n'));
         (this.messageBox as any).parseContent();
 
-        if (!preserveScroll) {
+        if (!preserveScroll || this.selectedMessageIndex === -1 || this.selectedMessageIndex === msgs.length - 1) {
           this.messageBox.setScrollPerc(100);
         } else {
           (this.messageBox as any).childBase = prevChildBase;

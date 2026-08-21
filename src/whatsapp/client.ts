@@ -390,16 +390,24 @@ export class WhatsAppService {
       kind = 'video';
       this.triggerMediaDownload(m, 'mp4');
     } else if (msg.documentMessage) {
-      text = `[Document] ${msg.documentMessage.fileName || 'file'}`;
-      kind = 'document';
+      if (msg.documentMessage.mimetype?.startsWith('audio/')) {
+        text = `[Audio] ${msg.documentMessage.fileName || 'audio'}`;
+        kind = 'audio';
+        this.triggerMediaDownload(m, 'ogg');
+      } else {
+        text = `[Document] ${msg.documentMessage.fileName || 'file'}`;
+        kind = 'document';
+      }
     } else if (msg.audioMessage) {
       text = '[Audio]' + viewOnceTag;
       kind = 'audio';
+      this.triggerMediaDownload(m, 'ogg');
     } else if (msg.pollCreationMessage) {
       text = `[Poll] ${msg.pollCreationMessage.name}`;
       kind = 'poll';
     } else {
       text = '[Message]' + viewOnceTag;
+      kind = 'audio';
     }
 
     const isGroup = chatId.endsWith('@g.us');
@@ -500,7 +508,7 @@ export class WhatsAppService {
     try {
       const m = JSON.parse(rawJson) as WAMessage;
       const unwrapped = unwrapMessage(m.message);
-      const isAudio = Boolean(unwrapped?.audioMessage);
+      const isAudio = Boolean(unwrapped?.audioMessage) || (Boolean(unwrapped?.documentMessage) && unwrapped?.documentMessage?.mimetype?.startsWith('audio/'));
       const isSticker = Boolean(unwrapped?.stickerMessage);
       const isVideo = Boolean(unwrapped?.videoMessage);
       const ext = isAudio ? 'ogg' : (isSticker ? 'webp' : (isVideo ? 'mp4' : 'jpg'));
@@ -521,7 +529,6 @@ export class WhatsAppService {
       if (parsed) {
         parsed.mediaPath = targetFile;
         this.db.saveMessage(parsed);
-        this.events.onNewMessage?.(parsed);
       }
 
       return targetFile;
