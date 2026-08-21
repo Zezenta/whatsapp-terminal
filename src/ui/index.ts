@@ -626,8 +626,7 @@ export class TerminalUI {
     const curTime = formatSeconds(state.currentTime);
     const durTime = formatSeconds(state.duration);
     const statusIcon = state.isPlaying ? '{green-fg}▶ Playing{/}' : '{yellow-fg}⏸ Paused{/}';
-
-    const content = ` ${statusIcon} {bold}@${sender}{/} {cyan-fg}[${bar}]{/} {bold}${curTime}{/}/{gray-fg}${durTime}{/} {magenta-fg}[${state.speed.toFixed(2)}x]{/} | {gray-fg}[P] Pause [←/→] ±5s [↑/↓] Speed [T] Transcribe [q] Close{/}`;
+    const content = ` ${statusIcon} {bold}@${sender}{/} {cyan-fg}[${bar}]{/} {bold}${curTime}{/}/{gray-fg}${durTime}{/} {magenta-fg}[${state.speed}x]{/} | {gray-fg}[P] Pause [←/→] ±5s [↑/↓] Speed [T] Transcribe [Esc] Close{/}`;
 
     this.audioBar.setContent(content);
     this.updateHeader();

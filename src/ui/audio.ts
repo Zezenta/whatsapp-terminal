@@ -25,7 +25,7 @@ export class AudioPlayer {
   private speed: number = 1.0;
   private onStateChange: ((state: AudioState | null) => void) | null = null;
 
-  private readonly SPEED_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+  private readonly SPEED_STEPS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
 
   constructor(onStateChange?: (state: AudioState | null) => void) {
     if (onStateChange) this.onStateChange = onStateChange;
@@ -159,7 +159,7 @@ export class AudioPlayer {
   public adjustSpeed(direction: 'up' | 'down') {
     if (!this.currentMsgId) return;
     let currentIndex = this.SPEED_STEPS.findIndex(s => Math.abs(s - this.speed) < 0.05);
-    if (currentIndex === -1) currentIndex = 2; // default 1.0
+    if (currentIndex === -1) currentIndex = 1; // default 1.0
 
     if (direction === 'up') {
       if (currentIndex < this.SPEED_STEPS.length - 1) {
