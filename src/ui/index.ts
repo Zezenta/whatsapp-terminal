@@ -473,28 +473,37 @@ export class TerminalUI {
 
     this.inputBox.on('submit', async (text) => {
       const trimmed = text.trim();
+      const replyTarget = this.replyingTo;
+      this.replyingTo = null;
+      this.inputBox.setValue('');
+      this.inputBox.clearValue();
+      this.setFocus('messages');
+      this.screen.realloc();
+      this.screen.render();
+
       if (trimmed && this.selectedChat) {
         try {
-          if (this.replyingTo) {
-            await this.waService.sendReplyMessage(this.selectedChat.id, trimmed, this.replyingTo);
+          if (replyTarget) {
+            await this.waService.sendReplyMessage(this.selectedChat.id, trimmed, replyTarget);
           } else {
             await this.waService.sendMessage(this.selectedChat.id, trimmed);
           }
-          this.replyingTo = null;
           await this.loadMessagesForSelectedChat(false);
         } catch (err: any) {
           this.updateStatus('error', err?.message || 'Send failed');
         }
       }
-      this.replyingTo = null;
-      this.inputBox.setValue('');
-      this.setFocus('messages');
+      this.screen.realloc();
+      this.screen.render();
     });
 
     this.inputBox.on('cancel', () => {
       this.replyingTo = null;
       this.inputBox.setValue('');
+      this.inputBox.clearValue();
       this.setFocus('messages');
+      this.screen.realloc();
+      this.screen.render();
     });
   }
 
@@ -817,6 +826,7 @@ export class TerminalUI {
     }
 
     this.updateHeader();
+    this.screen.realloc();
     this.screen.render();
   }
 
@@ -885,6 +895,7 @@ export class TerminalUI {
     const selectedIdx = (this.chatList as any).selected;
     if (selectedIdx >= 0 && selectedIdx < this.chats.length) {
       this.selectedChat = this.chats[selectedIdx];
+      this.screen.realloc();
       this.loadMessagesForSelectedChat(false);
       this.waService.syncChatMedia(this.selectedChat.id);
     }

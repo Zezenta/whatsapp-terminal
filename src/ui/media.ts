@@ -65,7 +65,7 @@ export async function prepareImageForKitty(imageSource: string, maxCols = 34, ma
 }
 
 export function createKittyPlacement(item: PreparedImage, screenX: number, screenY: number): string {
-  let out = `\x1b[s\x1b[${screenY};${screenX}H`;
+  let out = `\x1b7\x1b[${screenY};${screenX}H`;
 
   const b64 = item.pngBuffer.toString('base64');
   const chunkSize = 4096;
@@ -78,11 +78,11 @@ export function createKittyPlacement(item: PreparedImage, screenX: number, scree
     if (i === 0) {
       out += `\x1b_Ga=T,f=100,z=1,q=2,c=${item.cols},r=${item.rows},m=${m};${chunk}\x1b\\`;
     } else {
-      out += `\x1b_Gm=${m};${chunk}\x1b\\`;
+      out += `\x1b_Gm=${m},q=2;${chunk}\x1b\\`;
     }
   }
 
-  out += '\x1b[u';
+  out += '\x1b8';
   return out;
 }
 
