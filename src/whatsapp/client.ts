@@ -925,8 +925,20 @@ export class WhatsAppService {
       }
     } catch {}
 
+    try {
+      if (fs.existsSync(this.mediaDir)) {
+        fs.rmSync(this.mediaDir, { recursive: true, force: true });
+        fs.mkdirSync(this.mediaDir, { recursive: true });
+      }
+    } catch {}
+
+    try {
+      this.db.clearAllUserData();
+    } catch {}
+
     this.sock = null;
     this.isConnecting = false;
+    this.events.onChatsUpdated?.([]);
     this.events.onStatusChange?.('qr');
 
     setTimeout(() => {

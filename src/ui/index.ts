@@ -735,7 +735,15 @@ export class TerminalUI {
   private async handleLogout() {
     this.closeMenu();
     this.audioPlayer.stop();
-    this.header.setContent(' {bold}{yellow-fg}● Cerrando sesión y desvinculando WhatsApp...{/}');
+    this.chats = [];
+    this.currentMessages = [];
+    this.selectedChat = null;
+    this.selectedMessageIndex = -1;
+    this.replyingTo = null;
+    this.chatList.setItems([]);
+    this.messageBox.setContent('');
+    this.renderChatList();
+    this.header.setContent(' {bold}{yellow-fg}● Cerrando sesión, borrando datos y desvinculando WhatsApp...{/}');
     this.screen.render();
     await this.waService.logout();
   }

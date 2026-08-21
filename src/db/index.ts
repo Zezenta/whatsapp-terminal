@@ -551,6 +551,17 @@ export class LocalDatabase {
     } catch {}
   }
 
+  public clearAllUserData() {
+    try {
+      this.db.exec(`
+        DELETE FROM messages;
+        DELETE FROM chats;
+        DELETE FROM contacts;
+        VACUUM;
+      `);
+    } catch {}
+  }
+
   public close() {
     this.db.close();
   }
