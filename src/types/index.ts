@@ -19,6 +19,7 @@ export interface Message {
   mediaPreview?: string;
   rawMsg?: string;
   reaction?: string;
+  transcription?: string;
   quotedMsgId?: string;
   quotedText?: string;
   quotedSender?: string;

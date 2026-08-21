@@ -216,7 +216,7 @@ export async function transcribeAudioWithVoxtype(audioPath: string): Promise<str
     });
 
     return await new Promise<string>((resolve, reject) => {
-      const proc = spawn('voxtype', ['transcribe', tempWav]);
+      const proc = spawn('voxtype', ['--model', 'tiny', '--language', 'es', 'transcribe', tempWav]);
       let stdout = '';
       let stderr = '';
       proc.stdout.on('data', (d) => { stdout += d.toString(); });
@@ -226,7 +226,13 @@ export async function transcribeAudioWithVoxtype(audioPath: string): Promise<str
           const cleanLines = stdout.split('\n')
             .map(l => l.trim())
             .filter(l => l && !l.startsWith('Loading audio file:') && !l.startsWith('Audio format:') && !l.startsWith('Processing ') && !l.includes('INFO '));
-          resolve(cleanLines.join(' ').trim());
+          
+          let result = cleanLines.join(' ').trim();
+          if (!result && stdout.includes('Transcription completed in')) {
+            const match = stdout.match(/Transcription completed in [^:]+:\s*"([^"]+)"/);
+            if (match) result = match[1].trim();
+          }
+          resolve(result);
         } else {
           reject(new Error(stderr || `voxtype error code ${code}`));
         }

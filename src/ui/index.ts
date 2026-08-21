@@ -582,22 +582,25 @@ export class TerminalUI {
     }
 
     this.isTranscribing = true;
-    this.header.setContent(` {bold}{yellow-fg}● Transcribing audio with voxtype (Whisper local)...{/}`);
+    this.header.setContent(` {bold}{yellow-fg}● Transcribing audio with Voxtype (Tiny Español)...{/}`);
     this.screen.render();
 
     try {
       const transcribed = await transcribeAudioWithVoxtype(audioFile);
       if (transcribed && transcribed.trim() !== '') {
-        selectedMsg.text = `[Audio 🎤]: "${transcribed.trim()}"`;
+        selectedMsg.transcription = transcribed.trim();
         this.db.saveMessage(selectedMsg);
-        this.header.setContent(` {bold}{green-fg}● Transcription complete for ${selectedMsg.senderName}!{/}`);
+        this.header.setContent(` {bold}{green-fg}● Transcripción completada: "${transcribed.trim().slice(0, 35)}..."{/}`);
         await this.loadMessagesForSelectedChat(true);
+        if (this.audioPlayer.isActive()) {
+          this.renderAudioBar(this.audioPlayer.getState());
+        }
       } else {
-        this.header.setContent(' {bold}{yellow-fg}● Transcription finished: No speech detected{/}');
+        this.header.setContent(' {bold}{yellow-fg}● Transcripción finalizada: No se detectó voz{/}');
         this.screen.render();
       }
     } catch (err: any) {
-      this.header.setContent(` {bold}{red-fg}● Transcription error: ${err?.message || 'voxtype error'}{/}`);
+      this.header.setContent(` {bold}{red-fg}● Error al transcribir: ${err?.message || 'voxtype error'}{/}`);
       this.screen.render();
     } finally {
       this.isTranscribing = false;
@@ -613,9 +616,6 @@ export class TerminalUI {
       return;
     }
 
-    this.audioBar.show();
-    this.messageBox.height = '100%-10';
-
     const msg = this.currentMessages.find(m => m.id === state.msgId);
     const sender = msg ? msg.senderName : 'Audio';
 
@@ -627,9 +627,21 @@ export class TerminalUI {
     const curTime = formatSeconds(state.currentTime);
     const durTime = formatSeconds(state.duration);
     const statusIcon = state.isPlaying ? '{green-fg}▶ Playing{/}' : '{yellow-fg}⏸ Paused{/}';
-    const content = ` ${statusIcon} {bold}@${sender}{/} {cyan-fg}[${bar}]{/} {bold}${curTime}{/}/{gray-fg}${durTime}{/} {magenta-fg}[${state.speed}x]{/} | {gray-fg}[P] Pause [←/→] ±5s [↑/↓] Speed [T] Transcribe [Esc] Close{/}`;
+    const controls = ` ${statusIcon} {bold}@${sender}{/} {cyan-fg}[${bar}]{/} {bold}${curTime}{/}/{gray-fg}${durTime}{/} {magenta-fg}[${state.speed}x]{/} | {gray-fg}[P] Pause [←/→] ±5s [↑/↓] Speed [T] Transcribe [Esc] Close{/}`;
 
-    this.audioBar.setContent(content);
+    if (msg?.transcription) {
+      this.audioBar.height = 4;
+      this.messageBox.height = '100%-11';
+      const transSnippet = sanitizeTextForTui(msg.transcription).replace(/\n/g, ' ');
+      const content = `${controls}\n {yellow-fg}🎤 "${blescape(transSnippet)}"{/}`;
+      this.audioBar.setContent(content);
+    } else {
+      this.audioBar.height = 3;
+      this.messageBox.height = '100%-10';
+      this.audioBar.setContent(controls);
+    }
+
+    this.audioBar.show();
     this.updateHeader();
     this.screen.render();
   }
@@ -989,6 +1001,12 @@ export class TerminalUI {
             out = `  {gray-fg}(${timeStr}){/} {${senderColor}}{bold}${escapedSender}:{/} ${escapedText}${reactionBadge}`;
           }
           renderedLines.push(out);
+
+          if (m.transcription) {
+            const sanitizedTrans = sanitizeTextForTui(m.transcription);
+            const escapedTrans = blessed.escape(sanitizedTrans);
+            renderedLines.push(`    {yellow-fg}🎤 Transcripción:{/} {italic}"${escapedTrans}"{/}`);
+          }
 
           const isSticker = m.kind === 'sticker';
           const isMedia = m.kind === 'image' || isSticker;

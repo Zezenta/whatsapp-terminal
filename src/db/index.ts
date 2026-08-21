@@ -52,6 +52,7 @@ export class LocalDatabase {
         media_preview TEXT,
         raw_msg TEXT,
         reaction TEXT,
+        transcription TEXT,
         quoted_msg_id TEXT,
         quoted_text TEXT,
         quoted_sender TEXT
@@ -73,6 +74,9 @@ export class LocalDatabase {
     } catch {}
     try {
       this.db.exec('ALTER TABLE messages ADD COLUMN reaction TEXT;');
+    } catch {}
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN transcription TEXT;');
     } catch {}
     try {
       this.db.exec('ALTER TABLE messages ADD COLUMN quoted_msg_id TEXT;');
@@ -362,13 +366,14 @@ export class LocalDatabase {
     }
 
     const stmt = this.db.prepare(`
-      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview, raw_msg, reaction, quoted_msg_id, quoted_text, quoted_sender)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, chat_id, sender_id, sender_name, timestamp, from_me, text, kind, media_path, media_preview, raw_msg, reaction, transcription, quoted_msg_id, quoted_text, quoted_sender)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         media_path = CASE WHEN excluded.media_path IS NOT NULL AND excluded.media_path != '' THEN excluded.media_path ELSE messages.media_path END,
         media_preview = CASE WHEN excluded.media_preview IS NOT NULL AND excluded.media_preview != '' THEN excluded.media_preview ELSE messages.media_preview END,
         raw_msg = CASE WHEN excluded.raw_msg IS NOT NULL AND excluded.raw_msg != '' THEN excluded.raw_msg ELSE messages.raw_msg END,
         reaction = CASE WHEN excluded.reaction IS NOT NULL THEN excluded.reaction ELSE messages.reaction END,
+        transcription = CASE WHEN excluded.transcription IS NOT NULL AND excluded.transcription != '' THEN excluded.transcription ELSE messages.transcription END,
         quoted_msg_id = CASE WHEN excluded.quoted_msg_id IS NOT NULL THEN excluded.quoted_msg_id ELSE messages.quoted_msg_id END,
         quoted_text = CASE WHEN excluded.quoted_text IS NOT NULL THEN excluded.quoted_text ELSE messages.quoted_text END,
         quoted_sender = CASE WHEN excluded.quoted_sender IS NOT NULL THEN excluded.quoted_sender ELSE messages.quoted_sender END
@@ -386,6 +391,7 @@ export class LocalDatabase {
       msg.mediaPreview || null,
       msg.rawMsg || null,
       msg.reaction || null,
+      msg.transcription || null,
       msg.quotedMsgId || null,
       msg.quotedText || null,
       msg.quotedSender || null
@@ -425,6 +431,7 @@ export class LocalDatabase {
       media_preview?: string;
       raw_msg?: string;
       reaction?: string;
+      transcription?: string;
       quoted_msg_id?: string;
       quoted_text?: string;
       quoted_sender?: string;
@@ -449,6 +456,7 @@ export class LocalDatabase {
         mediaPreview: r.media_preview || undefined,
         rawMsg: r.raw_msg || undefined,
         reaction: r.reaction || undefined,
+        transcription: r.transcription || undefined,
         quotedMsgId: r.quoted_msg_id || undefined,
         quotedText: r.quoted_text || undefined,
         quotedSender: r.quoted_sender || undefined
