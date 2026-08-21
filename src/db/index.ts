@@ -60,6 +60,11 @@ export class LocalDatabase {
         quoted_sender TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
+
       CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_contacts_lid ON contacts(lid);
       CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
@@ -526,6 +531,24 @@ export class LocalDatabase {
       SELECT COUNT(*) as count FROM messages WHERE chat_id = ? OR chat_id = ?
     `).get(canonicalChatId, chatId) as { count: number } | undefined;
     return res?.count || 0;
+  }
+
+  public getSetting(key: string, defaultVal: string = ''): string {
+    try {
+      const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value?: string } | undefined;
+      return row?.value ?? defaultVal;
+    } catch {
+      return defaultVal;
+    }
+  }
+
+  public setSetting(key: string, value: string) {
+    try {
+      this.db.prepare(`
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(key, value);
+    } catch {}
   }
 
   public close() {

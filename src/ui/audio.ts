@@ -230,7 +230,7 @@ export function extractCleanTranscription(rawOutput: string): string {
   return result;
 }
 
-export async function transcribeAudioWithVoxtype(audioPath: string): Promise<string> {
+export async function transcribeAudioWithVoxtype(audioPath: string, model: string = 'tiny'): Promise<string> {
   const tempWav = path.join(os.tmpdir(), `voxtype_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
   try {
     await new Promise<void>((resolve, reject) => {
@@ -245,7 +245,7 @@ export async function transcribeAudioWithVoxtype(audioPath: string): Promise<str
     });
 
     return await new Promise<string>((resolve, reject) => {
-      const proc = spawn('voxtype', ['--model', 'tiny', '--language', 'es', 'transcribe', tempWav]);
+      const proc = spawn('voxtype', ['--model', model, '--language', 'es', 'transcribe', tempWav]);
       let stdout = '';
       let stderr = '';
       proc.stdout.on('data', (d) => { stdout += d.toString(); });

@@ -61,10 +61,14 @@ export class TerminalUI {
   private audioBar: blessed.Widgets.BoxElement;
   private inputBox: blessed.Widgets.TextboxElement;
   private qrBox: blessed.Widgets.BoxElement;
+  private menuBox: blessed.Widgets.ListElement;
 
   private db: LocalDatabase;
   private waService: WhatsAppService;
   private audioPlayer: AudioPlayer;
+
+  private isMenuOpen = false;
+  private voxtypeModel: 'tiny' | 'base' | 'small' = 'tiny';
 
   private chats: Chat[] = [];
   private selectedChat: Chat | null = null;
@@ -85,6 +89,11 @@ export class TerminalUI {
 
     this.db = database;
     this.waService = whatsapp;
+
+    const savedModel = this.db.getSetting('voxtype_model', 'tiny');
+    if (savedModel === 'base' || savedModel === 'small' || savedModel === 'tiny') {
+      this.voxtypeModel = savedModel;
+    }
 
     this.screen = blessed.screen({
       smartCSR: true,
@@ -266,6 +275,37 @@ export class TerminalUI {
       align: 'center'
     });
 
+    this.menuBox = blessed.list({
+      top: 'center',
+      left: 'center',
+      width: 58,
+      height: 10,
+      tags: true,
+      hidden: true,
+      border: {
+        type: 'line'
+      },
+      label: ' {bold}{green-fg}⚙️ Configuración / Modelo de Voxtype{/} ',
+      style: {
+        bg: 'black',
+        fg: 'white',
+        border: {
+          fg: '#00E676'
+        },
+        selected: {
+          bg: '#1E3326',
+          fg: '#00E676',
+          bold: true
+        },
+        item: {
+          bg: 'black',
+          fg: 'white'
+        }
+      },
+      keys: false,
+      mouse: true
+    });
+
     this.screen.append(this.header);
     this.screen.append(this.chatList);
     this.screen.append(this.chatHeader);
@@ -273,6 +313,7 @@ export class TerminalUI {
     this.screen.append(this.audioBar);
     this.screen.append(this.inputBox);
     this.screen.append(this.qrBox);
+    this.screen.append(this.menuBox);
 
     this.setupKeybindings();
     this.loadCachedChats();
@@ -293,8 +334,18 @@ export class TerminalUI {
       return process.exit(0);
     });
 
+    this.screen.key(['m', 'M'], () => {
+      if (this.activePanel !== 'input') {
+        if (this.isMenuOpen) {
+          this.closeMenu();
+        } else {
+          this.openMenu();
+        }
+      }
+    });
+
     this.screen.key(['tab'], () => {
-      if (this.activePanel === 'input') return;
+      if (this.activePanel === 'input' || this.isMenuOpen) return;
 
       if (this.activePanel === 'chats') {
         this.setFocus('messages');
@@ -304,6 +355,11 @@ export class TerminalUI {
     });
 
     this.screen.key(['up', 'k'], () => {
+      if (this.isMenuOpen) {
+        (this.menuBox as any).up(1);
+        this.screen.render();
+        return;
+      }
       if (this.activePanel === 'chats') {
         (this.chatList as any).up(1);
         this.onChatSelectionChanged();
@@ -317,6 +373,11 @@ export class TerminalUI {
     });
 
     this.screen.key(['down', 'j'], () => {
+      if (this.isMenuOpen) {
+        (this.menuBox as any).down(1);
+        this.screen.render();
+        return;
+      }
       if (this.activePanel === 'chats') {
         (this.chatList as any).down(1);
         this.onChatSelectionChanged();
@@ -330,12 +391,14 @@ export class TerminalUI {
     });
 
     this.screen.key(['left', 'h'], () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages' && this.audioPlayer.isActive()) {
         this.audioPlayer.seek(-5);
       }
     });
 
     this.screen.key(['right', 'l'], () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages' && this.audioPlayer.isActive()) {
         this.audioPlayer.seek(5);
       }
@@ -343,6 +406,7 @@ export class TerminalUI {
 
     // Play/Pause audio with 'P' / 'p'
     this.screen.key(['p', 'P'], async () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages' && this.selectedChat) {
         await this.handleAudioToggle();
       }
@@ -350,12 +414,14 @@ export class TerminalUI {
 
     // Transcribe audio with 'T' / 't' via local voxtype
     this.screen.key(['t', 'T'], async () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages' && this.selectedChat) {
         await this.handleAudioTranscribe();
       }
     });
 
     this.screen.key(['pageup'], async () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages') {
         if (this.currentMessages.length > 0) {
           const step = 8;
@@ -374,6 +440,7 @@ export class TerminalUI {
     });
 
     this.screen.key(['pagedown'], async () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages') {
         if (this.currentMessages.length > 0) {
           const step = 8;
@@ -388,20 +455,28 @@ export class TerminalUI {
     });
 
     this.messageBox.on('wheelup', () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages') {
         this.selectPreviousMessage();
       }
     });
 
     this.messageBox.on('wheeldown', () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel === 'messages') {
         this.selectNextMessage();
       }
     });
 
-    // 1-6 reaction shortcuts on selected message
+    // 1-6 reaction shortcuts on selected message or 1-3 in menu
     for (const key of ['1', '2', '3', '4', '5', '6']) {
       this.screen.key([key], async () => {
+        if (this.isMenuOpen) {
+          if (key === '1') this.selectVoxtypeModel('tiny');
+          else if (key === '2') this.selectVoxtypeModel('base');
+          else if (key === '3') this.selectVoxtypeModel('small');
+          return;
+        }
         if (this.activePanel === 'messages' && this.selectedChat && this.selectedMessageIndex >= 0) {
           const msg = this.currentMessages[this.selectedMessageIndex];
           if (msg) {
@@ -419,6 +494,7 @@ export class TerminalUI {
 
     // Open image/video/media
     this.screen.key(['o', 'O', 'v', 'V'], async () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel !== 'input' && this.selectedChat) {
         const selectedMsg = (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length)
           ? this.currentMessages[this.selectedMessageIndex]
@@ -428,6 +504,14 @@ export class TerminalUI {
     });
 
     this.screen.key(['enter', 'r'], () => {
+      if (this.isMenuOpen) {
+        const idx = (this.menuBox as any).selected;
+        if (idx === 0) this.selectVoxtypeModel('tiny');
+        else if (idx === 1) this.selectVoxtypeModel('base');
+        else if (idx === 2) this.selectVoxtypeModel('small');
+        else this.closeMenu();
+        return;
+      }
       if (this.activePanel === 'messages' && this.selectedChat) {
         if (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.currentMessages.length) {
           this.replyingTo = this.currentMessages[this.selectedMessageIndex];
@@ -445,6 +529,7 @@ export class TerminalUI {
     });
 
     this.screen.key(['i'], () => {
+      if (this.isMenuOpen) return;
       if (this.activePanel !== 'input' && this.selectedChat) {
         this.replyingTo = null;
         this.setFocus('input');
@@ -454,6 +539,10 @@ export class TerminalUI {
     });
 
     this.screen.key(['escape', 'Esc'], () => {
+      if (this.isMenuOpen) {
+        this.closeMenu();
+        return;
+      }
       if (this.audioPlayer.isActive()) {
         this.audioPlayer.stop();
         return;
@@ -461,6 +550,10 @@ export class TerminalUI {
     });
 
     this.screen.key(['q'], () => {
+      if (this.isMenuOpen) {
+        this.closeMenu();
+        return;
+      }
       if (this.activePanel !== 'input') {
         if (this.audioPlayer.isActive()) {
           this.audioPlayer.stop();
@@ -582,15 +675,15 @@ export class TerminalUI {
     }
 
     this.isTranscribing = true;
-    this.header.setContent(` {bold}{yellow-fg}● Transcribing audio with Voxtype (Tiny Español)...{/}`);
+    this.header.setContent(` {bold}{yellow-fg}● Transcribiendo audio con Voxtype (${this.voxtypeModel.toUpperCase()})...{/}`);
     this.screen.render();
 
     try {
-      const transcribed = await transcribeAudioWithVoxtype(audioFile);
+      const transcribed = await transcribeAudioWithVoxtype(audioFile, this.voxtypeModel);
       if (transcribed && transcribed.trim() !== '') {
         selectedMsg.transcription = transcribed.trim();
         this.db.saveMessage(selectedMsg);
-        this.header.setContent(` {bold}{green-fg}● Transcripción completada: "${transcribed.trim().slice(0, 35)}..."{/}`);
+        this.header.setContent(` {bold}{green-fg}● Transcripción completada (${this.voxtypeModel}): "${transcribed.trim().slice(0, 35)}..."{/}`);
         await this.loadMessagesForSelectedChat(true);
         if (this.audioPlayer.isActive()) {
           this.renderAudioBar(this.audioPlayer.getState());
@@ -605,6 +698,55 @@ export class TerminalUI {
     } finally {
       this.isTranscribing = false;
     }
+  }
+
+  private openMenu() {
+    if (this.isMenuOpen) return;
+    this.isMenuOpen = true;
+    this.renderMenuItems();
+    this.menuBox.show();
+    this.menuBox.focus();
+    this.screen.render();
+  }
+
+  private renderMenuItems() {
+    const isTiny = this.voxtypeModel === 'tiny';
+    const isBase = this.voxtypeModel === 'base';
+    const isSmall = this.voxtypeModel === 'small';
+
+    const check = (active: boolean) => active ? ' {bold}{green-fg}[✓ Activo]{/}' : ' {gray-fg}[ ]{/}';
+
+    const items = [
+      ` 1. Tiny Multi  (74 MB  - Ultra Rápido)${check(isTiny)}`,
+      ` 2. Base Multi  (141 MB - Balanceado)${check(isBase)}`,
+      ` 3. Small Multi (465 MB - Mayor Precisión)${check(isSmall)}`,
+      ` {gray-fg}─── [Esc / q] Cerrar Menú ───{/}`
+    ];
+
+    this.menuBox.setItems(items);
+    const activeIdx = isTiny ? 0 : (isBase ? 1 : 2);
+    (this.menuBox as any).select(activeIdx);
+  }
+
+  private selectVoxtypeModel(model: 'tiny' | 'base' | 'small') {
+    this.voxtypeModel = model;
+    this.db.setSetting('voxtype_model', model);
+    const names: Record<string, string> = {
+      tiny: 'Tiny Multi (74 MB)',
+      base: 'Base Multi (141 MB)',
+      small: 'Small Multi (465 MB)'
+    };
+    this.closeMenu();
+    this.header.setContent(` {bold}{green-fg}● Modelo de Voxtype cambiado a: ${names[model]}{/}`);
+    this.screen.render();
+  }
+
+  private closeMenu() {
+    if (!this.isMenuOpen) return;
+    this.isMenuOpen = false;
+    this.menuBox.hide();
+    this.setFocus(this.activePanel);
+    this.screen.render();
   }
 
   private renderAudioBar(state: AudioState | null) {
@@ -857,13 +999,13 @@ export class TerminalUI {
     } else if (this.activePanel === 'messages') {
       const selectedMsg = this.selectedMessageIndex >= 0 ? this.currentMessages[this.selectedMessageIndex] : null;
       const isAudio = selectedMsg?.kind === 'audio';
-      const audioTip = isAudio ? ' | {magenta-fg}[P] Play Audio [T] Voxtype{/}' : '';
+      const audioTip = isAudio ? ` | {magenta-fg}[P] Audio [T] Voxtype (${this.voxtypeModel}){/}` : ` | {gray-fg}[T] Voxtype (${this.voxtypeModel}){/}`;
       const reactionInfo = selectedMsg ? ' | [1-6] React' : '';
-      this.header.setContent(` {bold}{green-fg}● Message Box{/} | {yellow-fg}[Enter/r] Reply${audioTip}${reactionInfo}{/} | {gray-fg}[Tab] Chats | [o/O] Media | [q] Quit{/}`);
-      this.inputBox.setLabel(' {gray-fg}Press [i/Enter] to type{/} ');
+      this.header.setContent(` {bold}{green-fg}● Mensajes{/} | [m] Menú${audioTip}${reactionInfo} | {gray-fg}[Enter/r] Responder | [Tab] Chats | [q] Salir{/}`);
+      this.inputBox.setLabel(' {gray-fg}Presiona [i/Enter] para escribir{/} ');
     } else {
-      this.header.setContent(' {bold}{green-fg}● WhatsApp Terminal{/} | {gray-fg}[Tab] Messages | [↑/↓] Select Chat | [i/Enter] Type | [q] Quit{/}');
-      this.inputBox.setLabel(' {gray-fg}Press [i/Enter] to type{/} ');
+      this.header.setContent(` {bold}{green-fg}● WhatsApp Terminal{/} | [m] Menú | {gray-fg}[Tab] Mensajes | [↑/↓] Seleccionar Chat | [i/Enter] Escribir | [q] Salir{/}`);
+      this.inputBox.setLabel(' {gray-fg}Presiona [i/Enter] para escribir{/} ');
     }
     this.screen.render();
   }
